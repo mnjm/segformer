@@ -211,7 +211,9 @@ def test_hf_segformer_parity(config_path: Path):
     assert local_params == hf_params
 
     torch.manual_seed(7)
-    pixel_values = torch.randn(2, local_cfg.in_chals, local_cfg.img_size, local_cfg.img_size)
+    pixel_values = torch.randn(
+        2, local_cfg.in_chals, local_cfg.img_size, local_cfg.img_size
+    )
 
     with torch.no_grad():
         hf_logits = hf_model(pixel_values).logits
