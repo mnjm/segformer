@@ -4,6 +4,7 @@ Mix Transformer encoder used by the SegFormer architecture.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def to_2tuple(x):
@@ -16,7 +17,7 @@ def to_2tuple(x):
     return x if isinstance(x, (list, tuple)) else (x, x)
 
 
-class OverlapPatchEmbeddings(nn.Module):
+class OverlapPatchMerging(nn.Module):
     """Convert an image tensor into overlapping patch embeddings."""
 
     def __init__(self, img_size=224, patch_size=7, stride=4, in_chans=3, embed_dim=768):
@@ -80,7 +81,7 @@ class DropPath(nn.Module):
         return out
 
 
-class Attention(nn.Module):
+class EfficientSelfAttention(nn.Module):
     """Compute multi-head self-attention with optional spatial reduction."""
 
     def __init__(
@@ -88,10 +89,10 @@ class Attention(nn.Module):
         dim,
         num_heads,
         qkv_bias=False,
-        qk_scale=None,
         attn_drop_rate=0.0,
         proj_drop_rate=0.0,
         sr_ratio=1,
+        use_sdpa_attn=True,
     ):
         """Initialize attention projection layers and reduction settings.
 
@@ -99,10 +100,10 @@ class Attention(nn.Module):
             dim: Token embedding dimension.
             num_heads: Number of attention heads.
             qkv_bias: Whether query, key, and value projections use bias.
-            qk_scale: Optional manual scaling factor for attention scores.
             attn_drop_rate: Dropout rate applied to attention weights.
             proj_drop_rate: Dropout rate applied after the output projection.
             sr_ratio: Spatial reduction ratio for keys and values.
+            use_sdpa_attn: Whether to use scaled dot-product attention when available.
         """
         super().__init__()
         self.dim = dim
@@ -111,11 +112,16 @@ class Attention(nn.Module):
         assert dim % num_heads == 0, (
             f"dim {dim} should be divisible by num_heads {num_heads}"
         )
-        self.scale = qk_scale if qk_scale is not None else head_dim**-0.5
+        self.scale = head_dim**-0.5
+        self.attn_drop_rate = attn_drop_rate
+        self.use_sdpa_attn = use_sdpa_attn and hasattr(
+            F, "scaled_dot_product_attention"
+        )
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop_rate)
+        if not self.use_sdpa_attn:
+            self.attn_drop = nn.Dropout(attn_drop_rate)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop_rate)
 
@@ -156,11 +162,17 @@ class Attention(nn.Module):
             )  # 2, B, num_heads, tokens, head_dim
         k, v = kv[0], kv[1]
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        if self.use_sdpa_attn:
+            drop_p = self.attn_drop_rate if self.training else 0.0
+            x = F.scaled_dot_product_attention(
+                q, k, v, is_causal=False, dropout_p=drop_p
+            )
+        else:
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 
@@ -196,7 +208,7 @@ class DWConv(nn.Module):
         return x
 
 
-class Mlp(nn.Module):
+class MixFFN(nn.Module):
     """Project tokens through a feed-forward block with depthwise mixing."""
 
     def __init__(
@@ -251,7 +263,6 @@ class Block(nn.Module):
         num_heads,
         mlp_ratio,
         qkv_bias=True,
-        qk_scale=None,
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
@@ -266,7 +277,6 @@ class Block(nn.Module):
             num_heads: Number of attention heads.
             mlp_ratio: Expansion ratio used inside the MLP block.
             qkv_bias: Whether attention projections use bias terms.
-            qk_scale: Optional manual scaling factor for attention scores.
             drop_rate: Dropout rate used in attention and MLP projections.
             attn_drop_rate: Dropout rate applied to attention weights.
             drop_path_rate: Stochastic depth rate for residual branches.
@@ -276,11 +286,10 @@ class Block(nn.Module):
         """
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(
+        self.attn = EfficientSelfAttention(
             dim,
             num_heads,
             qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
             attn_drop_rate=attn_drop_rate,
             proj_drop_rate=drop_rate,
             sr_ratio=sr_ratio,
@@ -288,7 +297,7 @@ class Block(nn.Module):
 
         self.drop_path = DropPath(drop_path_rate)
         self.norm2 = norm_layer(dim)
-        self.mlp = Mlp(
+        self.mlp = MixFFN(
             dim, dim * mlp_ratio, dim, act_layer=act_layer, drop_rate=drop_rate
         )
 
@@ -305,6 +314,31 @@ class Block(nn.Module):
         return x
 
 
+class MixTransformerStage(nn.Module):
+    """Run one encoder stage while preserving token and spatial metadata."""
+
+    def __init__(self, patch_embed, blocks, norm):
+        """Store the stage modules in execution order.
+
+        Args:
+            patch_embed: Patch embedding module producing ``(x, H, W)``.
+            blocks: Transformer blocks operating on token sequences.
+            norm: Final normalization layer for stage outputs.
+        """
+        super().__init__()
+        self.patch_embed = patch_embed
+        self.blocks = blocks
+        self.norm = norm
+
+    def forward(self, x):
+        """Apply patch embedding, transformer blocks, and stage normalization."""
+        x, H, W = self.patch_embed(x)
+        for block in self.blocks:
+            x = block(x, H, W)
+        x = self.norm(x)
+        return x, H, W
+
+
 class MixTransformer(nn.Module):
     """Encode an image into multi-scale feature maps with transformer stages."""
 
@@ -317,7 +351,6 @@ class MixTransformer(nn.Module):
         num_heads=[1, 2, 5, 8],
         mlp_ratios=[4, 4, 4, 4],
         qkv_bias=False,
-        qk_scale=None,
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
@@ -335,7 +368,6 @@ class MixTransformer(nn.Module):
             num_heads: Attention head counts for the encoder stages.
             mlp_ratios: Expansion ratios for the stage MLP blocks.
             qkv_bias: Whether attention projections use bias terms.
-            qk_scale: Optional manual scaling factor for attention scores.
             drop_rate: Dropout rate used in attention and MLP projections.
             attn_drop_rate: Dropout rate applied to attention weights.
             drop_path_rate: Maximum stochastic depth rate across all blocks.
@@ -353,47 +385,44 @@ class MixTransformer(nn.Module):
         assert len(sr_ratios) == len(depths)
         assert len(embed_dims) == len(depths)
 
-        patch_embeds, blocks, norms = [], [], []
+        stages = []
         dims = [in_chals] + embed_dims
         depth_drop_rates = [
             x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))
         ]
         cur = 0
         for l_i in range(len(depths)):
-            patch_embeds.append(
-                OverlapPatchEmbeddings(
-                    img_size=img_size // inp_reductions[l_i],
-                    patch_size=7 if l_i == 0 else 3,
-                    stride=4 if l_i == 0 else 2,
-                    in_chans=dims[l_i],
-                    embed_dim=dims[l_i + 1],
-                )
-            )
-            blocks.append(
-                nn.ModuleList(
-                    [
-                        Block(
-                            dim=embed_dims[l_i],
-                            num_heads=num_heads[l_i],
-                            mlp_ratio=mlp_ratios[l_i],
-                            qkv_bias=qkv_bias,
-                            qk_scale=qk_scale,
-                            drop_rate=drop_rate,
-                            attn_drop_rate=attn_drop_rate,
-                            drop_path_rate=depth_drop_rates[cur + b_i],
-                            norm_layer=norm_layer,
-                            sr_ratio=sr_ratios[l_i],
-                        )
-                        for b_i in range(depths[l_i])
-                    ]
+            stages.append(
+                MixTransformerStage(
+                    patch_embed=OverlapPatchMerging(
+                        img_size=img_size // inp_reductions[l_i],
+                        patch_size=7 if l_i == 0 else 3,
+                        stride=4 if l_i == 0 else 2,
+                        in_chans=dims[l_i],
+                        embed_dim=dims[l_i + 1],
+                    ),
+                    blocks=nn.ModuleList(
+                        [
+                            Block(
+                                dim=dims[l_i + 1],
+                                num_heads=num_heads[l_i],
+                                mlp_ratio=mlp_ratios[l_i],
+                                qkv_bias=qkv_bias,
+                                drop_rate=drop_rate,
+                                attn_drop_rate=attn_drop_rate,
+                                drop_path_rate=depth_drop_rates[cur + b_i],
+                                norm_layer=norm_layer,
+                                sr_ratio=sr_ratios[l_i],
+                            )
+                            for b_i in range(depths[l_i])
+                        ]
+                    ),
+                    norm=nn.LayerNorm(dims[l_i + 1]),
                 )
             )
             cur += depths[l_i]
-            norms.append(norm_layer(embed_dims[l_i]))
 
-        self.patch_embeds = nn.ModuleList(patch_embeds)
-        self.blocks = nn.ModuleList(blocks)
-        self.norms = nn.ModuleList(norms)
+        self.stages = nn.ModuleList(stages)
 
         if self.num_classes > 0:
             self.head = nn.Linear(embed_dims[3], num_classes)
@@ -430,13 +459,8 @@ class MixTransformer(nn.Module):
         B = x.shape[0]
         outs = []
 
-        for patch_embed, stage_blocks, norm in zip(
-            self.patch_embeds, self.blocks, self.norms, strict=True
-        ):
-            x, H, W = patch_embed(x)
-            for blk in stage_blocks.children():
-                x = blk(x, H, W)
-            x = norm(x)
+        for stage in self.stages:
+            x, H, W = stage(x)
             x = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()  # B, C, H, W
             outs.append(x)
 
