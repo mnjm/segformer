@@ -1,0 +1,49 @@
+[project]
+name = "segformer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "hydra-zen>=0.16.0",
+    "torch==2.10.0",
+    "torchvision>=0.25.0",
+    "transformers>=5.7.0",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.39.3",
+    "ruff>=0.15.12",
+]
+
+[tool.basedpyright]
+exclude = [".venv/", "**/*.ipynb"]
+typeCheckingMode = "standard"
+failOnWarnings = true
+reportAny = false
+reportExplicitAny = false
+reportPrivateImportUsage = false
+
+[tool.ruff]
+exclude = [ "*.ipynb", "**/*.ipynb", ".ipynb_checkpoints", ".venv/" ]
