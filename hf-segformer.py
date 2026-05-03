@@ -1,13 +1,13 @@
 # %%
 from pathlib import Path
 
-from transformers import SegformerModel
+from transformers import SegformerForSemanticSegmentation
 
 MODEL_ID = "nvidia/segformer-b0-finetuned-ade-512-512"
 cache_dir = Path("./cache")
 cache_dir.mkdir(parents=True, exist_ok=True)
 
-model = SegformerModel.from_pretrained(
+model = SegformerForSemanticSegmentation.from_pretrained(
     MODEL_ID,
     cache_dir=str(cache_dir),
 )
