@@ -87,13 +87,14 @@ class SegFormerDecoder(nn.Module):
         """
         t_H, t_W = inputs[0].shape[2:]
 
-        c_l = [self.linear_c[0](inputs[0])]
-        for i in range(1, len(self.linear_c)):
+        c_l = []
+        for i in reversed(range(len(self.linear_c))):
             x = self.linear_c[i](inputs[i])
-            x = F.interpolate(x, (t_H, t_W), mode="bilinear", align_corners=False)
+            if i > 0:
+                x = F.interpolate(x, (t_H, t_W), mode="bilinear", align_corners=False)
             c_l.append(x)
 
-        x = torch.cat(c_l[::-1], dim=1)
+        x = torch.cat(c_l, dim=1)
         x = self.linear_fuse(x)
         x = self.dropout(x)
 

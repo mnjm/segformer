@@ -21,7 +21,6 @@ class SegFormerConfig:
         num_heads: Attention head counts for each encoder stage.
         mlp_ratios: Expansion ratios for the MLP blocks in each stage.
         qkv_bias: Whether to use bias terms in attention projections.
-        qk_scale: Optional manual scaling factor for attention scores.
         drop_rate: Dropout rate used in encoder projection layers.
         attn_drop_rate: Dropout rate applied to attention weights.
         drop_path_rate: Maximum stochastic depth rate across encoder blocks.
@@ -39,7 +38,6 @@ class SegFormerConfig:
     num_heads: list[int] = field(default_factory=lambda: [1, 2, 5, 8])
     mlp_ratios: list[int] = field(default_factory=lambda: [4, 4, 4, 4])
     qkv_bias: bool = True
-    qk_scale: float | None = None
     drop_rate: float = 0.0
     attn_drop_rate: float = 0.0
     drop_path_rate: float = 0.0
@@ -70,7 +68,6 @@ class SegFormer(nn.Module):
             num_heads=cfg.num_heads,
             mlp_ratios=cfg.mlp_ratios,
             qkv_bias=cfg.qkv_bias,
-            qk_scale=cfg.qk_scale,
             drop_rate=cfg.drop_rate,
             attn_drop_rate=cfg.attn_drop_rate,
             drop_path_rate=cfg.drop_path_rate,
