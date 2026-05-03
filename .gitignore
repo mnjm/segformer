@@ -9,6 +9,6 @@ wheels/
 # Virtual environments
 .venv
 dataset/
-model-cache/
+cache/
 logs/
 *.zip
