@@ -1,3 +1,5 @@
+# This file contains a small script for loading and inspecting a Hugging Face SegFormer model.
+# Author: mnjm
 # %%
 from pathlib import Path
 

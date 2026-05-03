@@ -1,12 +1,34 @@
+"""
+Mix Transformer encoder used by the SegFormer architecture.
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from utils import to_2tuple
+
+def to_2tuple(x):
+    """
+    Return x as a 2-tuple; if x is scalar, return (x, x).
+
+    Args:
+        x: Scalar or sequence value.
+    """
+    return x if isinstance(x, (list, tuple)) else (x, x)
 
 
 class OverlapPatchEmbeddings(nn.Module):
+    """Convert an image tensor into overlapping patch embeddings."""
+
     def __init__(self, img_size=224, patch_size=7, stride=4, in_chans=3, embed_dim=768):
+        """Initialize the projection and normalization layers for patch embedding.
+
+        Args:
+            img_size: Input image size used for stage configuration.
+            patch_size: Convolution kernel size for extracting patches.
+            stride: Convolution stride between adjacent patches.
+            in_chans: Number of input channels.
+            embed_dim: Output embedding dimension per patch.
+        """
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
@@ -18,6 +40,11 @@ class OverlapPatchEmbeddings(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
+        """Project an image into flattened patch tokens.
+
+        Args:
+            x: Input image tensor of shape ``[batch, channels, height, width]``.
+        """
         x = self.proj(x)
         _, _, H, W = x.shape
         x = x.flatten(2).transpose(1, 2)
@@ -26,16 +53,23 @@ class OverlapPatchEmbeddings(nn.Module):
 
 
 class DropPath(nn.Module):
-    """
-    Stoch. Depth, a regularization method used in training residual networks, drops entire residual blocks during training.
-    Paper: https://arxiv.org/pdf/1603.09382
-    """
+    """Apply stochastic depth to a residual branch during training."""
 
     def __init__(self, drop_prob: float):
+        """Store the stochastic depth probability.
+
+        Args:
+            drop_prob: Probability of dropping a residual path during training.
+        """
         super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x):
+        """Randomly drop full residual paths for the current batch.
+
+        Args:
+            x: Input tensor to regularize.
+        """
         drop_prob = self.drop_prob
         if drop_prob == 0.0 or not self.training:
             return x
@@ -47,6 +81,8 @@ class DropPath(nn.Module):
 
 
 class Attention(nn.Module):
+    """Compute multi-head self-attention with optional spatial reduction."""
+
     def __init__(
         self,
         dim,
@@ -57,6 +93,17 @@ class Attention(nn.Module):
         proj_drop_rate=0.0,
         sr_ratio=1,
     ):
+        """Initialize attention projection layers and reduction settings.
+
+        Args:
+            dim: Token embedding dimension.
+            num_heads: Number of attention heads.
+            qkv_bias: Whether query, key, and value projections use bias.
+            qk_scale: Optional manual scaling factor for attention scores.
+            attn_drop_rate: Dropout rate applied to attention weights.
+            proj_drop_rate: Dropout rate applied after the output projection.
+            sr_ratio: Spatial reduction ratio for keys and values.
+        """
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -64,7 +111,7 @@ class Attention(nn.Module):
         assert dim % num_heads == 0, (
             f"dim {dim} should be divisible by num_heads {num_heads}"
         )
-        self.scale = qk_scale if qkv_scale is not None else head_dim**-0.5
+        self.scale = qk_scale if qk_scale is not None else head_dim**-0.5
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
@@ -78,6 +125,13 @@ class Attention(nn.Module):
             self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, H, W):
+        """Apply self-attention to a sequence of image tokens.
+
+        Args:
+            x: Token tensor of shape ``[batch, tokens, channels]``.
+            H: Feature map height corresponding to the token sequence.
+            W: Feature map width corresponding to the token sequence.
+        """
         B, N, C = x.shape
         q = (
             self.q(x)
@@ -114,13 +168,27 @@ class Attention(nn.Module):
 
 
 class DWConv(nn.Module):
+    """Apply depthwise convolution inside the MLP token mixing path."""
+
     def __init__(self, dim):
+        """Initialize the depthwise convolution layer.
+
+        Args:
+            dim: Number of input and output channels.
+        """
         super().__init__()
         self.dwconv = nn.Conv2d(
             dim, dim, kernel_size=3, stride=1, padding=1, bias=True, groups=dim
         )
 
     def forward(self, x, H, W):
+        """Reshape tokens to a feature map, convolve, and flatten back.
+
+        Args:
+            x: Token tensor of shape ``[batch, tokens, channels]``.
+            H: Feature map height corresponding to the token sequence.
+            W: Feature map width corresponding to the token sequence.
+        """
         B, N, C = x.shape
         x = x.transpose(1, 2).view(B, C, H, W)
         x = self.dwconv(x)
@@ -129,6 +197,8 @@ class DWConv(nn.Module):
 
 
 class Mlp(nn.Module):
+    """Project tokens through a feed-forward block with depthwise mixing."""
+
     def __init__(
         self,
         in_features,
@@ -137,6 +207,15 @@ class Mlp(nn.Module):
         act_layer=nn.GELU,
         drop_rate=0.0,
     ):
+        """Initialize the MLP projection, activation, and dropout layers.
+
+        Args:
+            in_features: Input token channel dimension.
+            hidden_features: Hidden channel dimension used inside the block.
+            out_features: Output token channel dimension.
+            act_layer: Activation layer class used between projections.
+            drop_rate: Dropout rate applied after each projection.
+        """
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -147,6 +226,13 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop_rate)
 
     def forward(self, x, H, W):
+        """Transform token features with linear and depthwise operations.
+
+        Args:
+            x: Token tensor of shape ``[batch, tokens, channels]``.
+            H: Feature map height corresponding to the token sequence.
+            W: Feature map width corresponding to the token sequence.
+        """
         x = self.fc1(x)
         x = self.dwconv(x, H, W)
         x = self.act(x)
@@ -157,6 +243,8 @@ class Mlp(nn.Module):
 
 
 class Block(nn.Module):
+    """Run one transformer block with attention and MLP residual branches."""
+
     def __init__(
         self,
         dim,
@@ -171,13 +259,28 @@ class Block(nn.Module):
         norm_layer=nn.LayerNorm,
         sr_ratio=1,
     ):
+        """Initialize normalization, attention, and MLP submodules.
+
+        Args:
+            dim: Token embedding dimension.
+            num_heads: Number of attention heads.
+            mlp_ratio: Expansion ratio used inside the MLP block.
+            qkv_bias: Whether attention projections use bias terms.
+            qk_scale: Optional manual scaling factor for attention scores.
+            drop_rate: Dropout rate used in attention and MLP projections.
+            attn_drop_rate: Dropout rate applied to attention weights.
+            drop_path_rate: Stochastic depth rate for residual branches.
+            act_layer: Activation layer class used by the MLP.
+            norm_layer: Normalization layer class used before each branch.
+            sr_ratio: Spatial reduction ratio used by attention.
+        """
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim,
             num_heads,
             qkv_bias=qkv_bias,
-            qk_scale=qkv_scale,
+            qk_scale=qk_scale,
             attn_drop_rate=attn_drop_rate,
             proj_drop_rate=drop_rate,
             sr_ratio=sr_ratio,
@@ -190,12 +293,21 @@ class Block(nn.Module):
         )
 
     def forward(self, x, H, W):
+        """Apply attention and MLP residual updates to the token sequence.
+
+        Args:
+            x: Token tensor of shape ``[batch, tokens, channels]``.
+            H: Feature map height corresponding to the token sequence.
+            W: Feature map width corresponding to the token sequence.
+        """
         x = x + self.drop_path(self.attn(self.norm1(x), H, W))
         x = x + self.drop_path(self.mlp(self.norm2(x), H, W))
         return x
 
 
 class MixTransformer(nn.Module):
+    """Encode an image into multi-scale feature maps with transformer stages."""
+
     def __init__(
         self,
         img_size=224,
@@ -213,6 +325,24 @@ class MixTransformer(nn.Module):
         depths=[2, 2, 2, 2],
         sr_ratios=[8, 4, 2, 1],
     ):
+        """Initialize the hierarchical Mix Transformer encoder.
+
+        Args:
+            img_size: Input image size used to configure stage resolutions.
+            in_chals: Number of input image channels.
+            num_classes: Number of classes for optional classification output.
+            embed_dims: Channel dimensions for the encoder stages.
+            num_heads: Attention head counts for the encoder stages.
+            mlp_ratios: Expansion ratios for the stage MLP blocks.
+            qkv_bias: Whether attention projections use bias terms.
+            qk_scale: Optional manual scaling factor for attention scores.
+            drop_rate: Dropout rate used in attention and MLP projections.
+            attn_drop_rate: Dropout rate applied to attention weights.
+            drop_path_rate: Maximum stochastic depth rate across all blocks.
+            norm_layer: Normalization layer class used in the encoder.
+            depths: Number of transformer blocks in each stage.
+            sr_ratios: Spatial reduction ratios for the attention layers.
+        """
         super().__init__()
         self.num_classes = num_classes
         self.depths = depths
@@ -247,7 +377,7 @@ class MixTransformer(nn.Module):
                             num_heads=num_heads[l_i],
                             mlp_ratio=mlp_ratios[l_i],
                             qkv_bias=qkv_bias,
-                            qk_scale=qkv_scale,
+                            qk_scale=qk_scale,
                             drop_rate=drop_rate,
                             attn_drop_rate=attn_drop_rate,
                             drop_path_rate=depth_drop_rates[cur + b_i],
@@ -272,6 +402,11 @@ class MixTransformer(nn.Module):
 
     @staticmethod
     def _init_weights(m: nn.Module):
+        """Initialize supported module weights in place.
+
+        Args:
+            m: Module instance to initialize.
+        """
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
@@ -287,14 +422,21 @@ class MixTransformer(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
     def forward(self, x):
+        """Encode an input image into stage outputs or class logits.
+
+        Args:
+            x: Input image tensor of shape ``[batch, channels, height, width]``.
+        """
         B = x.shape[0]
         outs = []
 
-        for l_i in range(len(self.blocks)):
-            x, H, W = self.patch_embeds[l_i](x)
-            for blk in self.blocks[l_i]:
+        for patch_embed, stage_blocks, norm in zip(
+            self.patch_embeds, self.blocks, self.norms, strict=True
+        ):
+            x, H, W = patch_embed(x)
+            for blk in stage_blocks.children():
                 x = blk(x, H, W)
-            x = self.norms[l_i](x)
+            x = norm(x)
             x = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()  # B, C, H, W
             outs.append(x)
 
@@ -303,134 +445,3 @@ class MixTransformer(nn.Module):
             return self.head(x)
 
         return outs
-
-
-class SegFormerDecoder(nn.Module):
-    def __init__(
-        self, in_chals=[32, 64, 160, 256], embed_dim=256, drop_rate=0.0, num_classes=21
-    ):
-        super().__init__()
-        # SegFormer uses MLP layers to unify the channel dimensions of the
-        # multi-scale encoder outputs. Here, I use a 1x1 convolution instead.
-        #
-        # A 1x1 convolution is mathematically equivalent to applying the same
-        # Linear(C_in, C_out) layer independently at every spatial location.
-        # It is more convenient here because the features are already in
-        # image/tensor format: [B, C, H, W].
-        #
-        # With an MLP, we would need to reshape each feature map into tokens:
-        #   [B, C, H, W]
-        #   -> flatten spatial dims: [B, C, H*W]
-        #   -> transpose:           [B, H*W, C]
-        #   -> Linear(C_in, C_out): [B, H*W, C_out]
-        #   -> transpose/reshape:   [B, C_out, H, W]
-        #
-        # A 1x1 convolution performs the same channel projection directly:
-        #   [B, C_in, H, W] -> [B, C_out, H, W]
-        #
-        # This avoids extra flatten/transpose/reshape operations while preserving
-        # the same per-pixel channel-unification behavior.
-        self.linear_c = nn.ModuleList(
-            [nn.Conv2d(c_in, embed_dim, kernel_size=1) for c_in in in_chals]
-        )
-
-        self.linear_fuse = nn.Sequential(
-            nn.Conv2d(embed_dim * len(in_chals), embed_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(embed_dim),
-            nn.ReLU(),
-        )
-
-        self.dropout = nn.Dropout(drop_rate)
-
-        self.clfr = nn.Conv2d(embed_dim, num_classes, kernel_size=1)
-
-        self.apply(self._init_weights)
-
-    @staticmethod
-    def _init_weights(m: nn.Module):
-        if isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0.0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0.0)
-            nn.init.constant_(m.weight, 1.0)
-        elif isinstance(m, nn.Conv2d):
-            fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-            fan_out = fan_out / m.groups
-            nn.init.normal_(m.weight, mean=0, std=(2 / fan_out) ** 0.5)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0.0)
-
-    def forward(self, inputs):
-        t_H, t_W = inputs[0].shape[2:]
-
-        c_l = [self.linear_c[0](inputs[0])]
-        for i in range(1, len(self.linear_c)):
-            x = self.linear_c[i](inputs[i])
-            x = F.interpolate(x, (t_H, t_W), mode="bilinear", align_corners=False)
-            c_l.append(x)
-
-        x = torch.cat(c_l, dim=1)
-        x = self.linear_fuse(x)
-        x = self.dropout(x)
-
-        return self.clfr(x)
-
-
-class SegFormer(nn.Module):
-    def __init__(
-        self,
-        img_size=224,
-        in_chals=3,
-        num_classes=150,
-        embed_dims=[32, 64, 160, 256],
-        num_heads=[1, 2, 5, 8],
-        mlp_ratios=[4, 4, 4, 4],
-        qkv_bias=True,
-        qk_scale=None,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
-        drop_path_rate=0.0,
-        norm_layer=nn.LayerNorm,
-        depths=[2, 2, 2, 2],
-        sr_ratios=[8, 4, 2, 1],
-        decoder_dim=256,
-    ):
-        super().__init__()
-
-        self.encoder = MixTransformer(
-            img_size=img_size,
-            in_chals=in_chals,
-            num_classes=0,
-            embed_dims=embed_dims,
-            num_heads=num_heads,
-            mlp_ratios=mlp_ratios,
-            qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
-            drop_rate=drop_rate,
-            attn_drop_rate=attn_drop_rate,
-            drop_path_rate=drop_path_rate,
-            norm_layer=norm_layer,
-            depths=depths,
-            sr_ratios=sr_ratios,
-        )
-
-        self.decoder = SegFormerDecoder(
-            in_chals=embed_dims,
-            embed_dim=decoder_dim,
-            drop_rate=drop_rate,
-            num_classes=num_classes,
-        )
-
-    def forward(self, x):
-        features = self.encoder(x)
-        return self.decoder(features)
-
-
-if __name__ == "__main__":
-    model = SegFormer()
-    print(sum([x.numel() for x in model.parameters()]))
-    x = torch.randn(1, 3, 224, 224)
-    output = model(x)
-    print(output.shape)
