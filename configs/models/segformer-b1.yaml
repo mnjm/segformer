@@ -1,0 +1,15 @@
+img_size: 512
+in_chals: 3
+num_classes: 150
+embed_dims: [64, 128, 320, 512]
+num_heads: [1, 2, 5, 8]
+mlp_ratios: [4, 4, 4, 4]
+qkv_bias: true
+qk_scale: null
+drop_rate: 0.0
+attn_drop_rate: 0.0
+drop_path_rate: 0.1
+depths: [2, 2, 2, 2]
+sr_ratios: [8, 4, 2, 1]
+decoder_dim: 256
+decoder_drop_rate: 0.1

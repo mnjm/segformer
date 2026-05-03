@@ -93,7 +93,7 @@ class SegFormerDecoder(nn.Module):
             x = F.interpolate(x, (t_H, t_W), mode="bilinear", align_corners=False)
             c_l.append(x)
 
-        x = torch.cat(c_l, dim=1)
+        x = torch.cat(c_l[::-1], dim=1)
         x = self.linear_fuse(x)
         x = self.dropout(x)
 
