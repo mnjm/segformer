@@ -314,6 +314,31 @@ class Block(nn.Module):
         return x
 
 
+class MixTransformerStage(nn.Module):
+    """Run one encoder stage while preserving token and spatial metadata."""
+
+    def __init__(self, patch_embed, blocks, norm):
+        """Store the stage modules in execution order.
+
+        Args:
+            patch_embed: Patch embedding module producing ``(x, H, W)``.
+            blocks: Transformer blocks operating on token sequences.
+            norm: Final normalization layer for stage outputs.
+        """
+        super().__init__()
+        self.patch_embed = patch_embed
+        self.blocks = blocks
+        self.norm = norm
+
+    def forward(self, x):
+        """Apply patch embedding, transformer blocks, and stage normalization."""
+        x, H, W = self.patch_embed(x)
+        for block in self.blocks:
+            x = block(x, H, W)
+        x = self.norm(x)
+        return x, H, W
+
+
 class MixTransformer(nn.Module):
     """Encode an image into multi-scale feature maps with transformer stages."""
 
@@ -360,46 +385,44 @@ class MixTransformer(nn.Module):
         assert len(sr_ratios) == len(depths)
         assert len(embed_dims) == len(depths)
 
-        patch_embeds, blocks, norms = [], [], []
+        stages = []
         dims = [in_chals] + embed_dims
         depth_drop_rates = [
             x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))
         ]
         cur = 0
         for l_i in range(len(depths)):
-            patch_embeds.append(
-                OverlapPatchMerging(
-                    img_size=img_size // inp_reductions[l_i],
-                    patch_size=7 if l_i == 0 else 3,
-                    stride=4 if l_i == 0 else 2,
-                    in_chans=dims[l_i],
-                    embed_dim=dims[l_i + 1],
-                )
-            )
-            blocks.append(
-                nn.ModuleList(
-                    [
-                        Block(
-                            dim=embed_dims[l_i],
-                            num_heads=num_heads[l_i],
-                            mlp_ratio=mlp_ratios[l_i],
-                            qkv_bias=qkv_bias,
-                            drop_rate=drop_rate,
-                            attn_drop_rate=attn_drop_rate,
-                            drop_path_rate=depth_drop_rates[cur + b_i],
-                            norm_layer=norm_layer,
-                            sr_ratio=sr_ratios[l_i],
-                        )
-                        for b_i in range(depths[l_i])
-                    ]
+            stages.append(
+                MixTransformerStage(
+                    patch_embed=OverlapPatchMerging(
+                        img_size=img_size // inp_reductions[l_i],
+                        patch_size=7 if l_i == 0 else 3,
+                        stride=4 if l_i == 0 else 2,
+                        in_chans=dims[l_i],
+                        embed_dim=dims[l_i + 1],
+                    ),
+                    blocks=nn.ModuleList(
+                        [
+                            Block(
+                                dim=dims[l_i + 1],
+                                num_heads=num_heads[l_i],
+                                mlp_ratio=mlp_ratios[l_i],
+                                qkv_bias=qkv_bias,
+                                drop_rate=drop_rate,
+                                attn_drop_rate=attn_drop_rate,
+                                drop_path_rate=depth_drop_rates[cur + b_i],
+                                norm_layer=norm_layer,
+                                sr_ratio=sr_ratios[l_i],
+                            )
+                            for b_i in range(depths[l_i])
+                        ]
+                    ),
+                    norm=nn.LayerNorm(dims[l_i + 1]),
                 )
             )
             cur += depths[l_i]
-            norms.append(norm_layer(embed_dims[l_i]))
 
-        self.patch_embeds = nn.ModuleList(patch_embeds)
-        self.blocks = nn.ModuleList(blocks)
-        self.norms = nn.ModuleList(norms)
+        self.stages = nn.ModuleList(stages)
 
         if self.num_classes > 0:
             self.head = nn.Linear(embed_dims[3], num_classes)
@@ -436,13 +459,8 @@ class MixTransformer(nn.Module):
         B = x.shape[0]
         outs = []
 
-        for patch_embed, stage_blocks, norm in zip(
-            self.patch_embeds, self.blocks, self.norms, strict=True
-        ):
-            x, H, W = patch_embed(x)
-            for blk in stage_blocks.children():
-                x = blk(x, H, W)
-            x = norm(x)
+        for stage in self.stages:
+            x, H, W = stage(x)
             x = x.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()  # B, C, H, W
             outs.append(x)
 

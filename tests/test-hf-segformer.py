@@ -51,28 +51,30 @@ def build_local_state_dict(
 
     num_stages = len(hf_model.config.depths)
     for stage_idx in range(num_stages):
-        local_state[f"encoder.patch_embeds.{stage_idx}.proj.weight"] = hf_state[
+        stage_base = f"encoder.stages.{stage_idx}"
+
+        local_state[f"{stage_base}.patch_embed.proj.weight"] = hf_state[
             f"segformer.encoder.patch_embeddings.{stage_idx}.proj.weight"
         ]
-        local_state[f"encoder.patch_embeds.{stage_idx}.proj.bias"] = hf_state[
+        local_state[f"{stage_base}.patch_embed.proj.bias"] = hf_state[
             f"segformer.encoder.patch_embeddings.{stage_idx}.proj.bias"
         ]
-        local_state[f"encoder.patch_embeds.{stage_idx}.norm.weight"] = hf_state[
+        local_state[f"{stage_base}.patch_embed.norm.weight"] = hf_state[
             f"segformer.encoder.patch_embeddings.{stage_idx}.layer_norm.weight"
         ]
-        local_state[f"encoder.patch_embeds.{stage_idx}.norm.bias"] = hf_state[
+        local_state[f"{stage_base}.patch_embed.norm.bias"] = hf_state[
             f"segformer.encoder.patch_embeddings.{stage_idx}.layer_norm.bias"
         ]
-        local_state[f"encoder.norms.{stage_idx}.weight"] = hf_state[
+        local_state[f"{stage_base}.norm.weight"] = hf_state[
             f"segformer.encoder.layer_norm.{stage_idx}.weight"
         ]
-        local_state[f"encoder.norms.{stage_idx}.bias"] = hf_state[
+        local_state[f"{stage_base}.norm.bias"] = hf_state[
             f"segformer.encoder.layer_norm.{stage_idx}.bias"
         ]
 
         for block_idx in range(hf_model.config.depths[stage_idx]):
             base = f"segformer.encoder.block.{stage_idx}.{block_idx}"
-            local_base = f"encoder.blocks.{stage_idx}.{block_idx}"
+            local_base = f"{stage_base}.blocks.{block_idx}"
 
             local_state[f"{local_base}.norm1.weight"] = hf_state[
                 f"{base}.layer_norm_1.weight"
