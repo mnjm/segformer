@@ -11,8 +11,12 @@ class SegFormerDecoder(nn.Module):
     """All MLP SegFormer Decoder"""
 
     def __init__(
-        self, in_chals=[32, 64, 160, 256], embed_dim=256, drop_rate=0.0, num_classes=150
-    ):
+        self,
+        in_chals: list[int] = [32, 64, 160, 256],
+        embed_dim: int = 256,
+        drop_rate: float = 0.0,
+        num_classes: int = 150,
+    ) -> None:
         """Initialize the decoder projection, fusion, and classifier layers.
 
         Args:
@@ -20,6 +24,9 @@ class SegFormerDecoder(nn.Module):
             embed_dim: Common channel size used after per-scale projection.
             drop_rate: Dropout rate applied before the final classifier.
             num_classes: Number of segmentation classes to predict.
+
+        Returns:
+            None: Initializes decoder layers in place.
         """
         super().__init__()
         # SegFormer uses MLP layers to unify the channel dimensions of the
@@ -59,11 +66,14 @@ class SegFormerDecoder(nn.Module):
         self.apply(self._init_weights)
 
     @staticmethod
-    def _init_weights(m: nn.Module):
+    def _init_weights(m: nn.Module) -> None:
         """Initialize supported module weights in place.
 
         Args:
             m: Module instance to initialize.
+
+        Returns:
+            None: Mutates supported module weights in place.
         """
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
@@ -79,11 +89,14 @@ class SegFormerDecoder(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0.0)
 
-    def forward(self, inputs):
+    def forward(self, inputs: list[torch.Tensor]) -> torch.Tensor:
         """Project, align, and fuse encoder features into segmentation logits.
 
         Args:
             inputs: List of feature tensors ordered from high to low resolution.
+
+        Returns:
+            torch.Tensor: Decoder logits at the highest encoder resolution.
         """
         t_H, t_W = inputs[0].shape[2:]
 

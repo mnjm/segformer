@@ -5,10 +5,8 @@ build/
 dist/
 wheels/
 *.egg-info
-
-# Virtual environments
 .venv
 dataset/
 cache/
 logs/
-*.zip
+wandb

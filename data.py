@@ -1,309 +1,296 @@
-# This file contains Pascal VOC semantic-segmentation dataset utilities for training and visualization.
+"""Pascal VOC semantic-segmentation data loading and visualization helpers."""
 
-from collections.abc import Sequence
+import logging
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchvision.transforms.v2 as T
+from bidict import bidict
+from hydra.utils import instantiate
+from omegaconf import DictConfig
 from PIL import Image
-from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from torchvision import tv_tensors
 from torchvision.io import read_image
 
-VOC_CLASSES: tuple[str, ...] = (
-    "background",
-    "aeroplane",
-    "bicycle",
-    "bird",
-    "boat",
-    "bottle",
-    "bus",
-    "car",
-    "cat",
-    "chair",
-    "cow",
-    "diningtable",
-    "dog",
-    "horse",
-    "motorbike",
-    "person",
-    "pottedplant",
-    "sheep",
-    "sofa",
-    "train",
-    "tvmonitor",
-)
-"""Pascal VOC semantic-segmentation class names."""
+from utils import to_2tuple
 
-VOC_COLOR_MAP = torch.tensor(
-    [
-        [0, 0, 0],
-        [128, 0, 0],
-        [0, 128, 0],
-        [128, 128, 0],
-        [0, 0, 128],
-        [128, 0, 128],
-        [0, 128, 128],
-        [128, 128, 128],
-        [64, 0, 0],
-        [192, 0, 0],
-        [64, 128, 0],
-        [192, 128, 0],
-        [64, 0, 128],
-        [192, 0, 128],
-        [64, 128, 128],
-        [192, 128, 128],
-        [0, 64, 0],
-        [128, 64, 0],
-        [0, 192, 0],
-        [128, 192, 0],
-        [0, 64, 128],
-    ],
-    dtype=torch.uint8,
-)
-"""Pascal VOC color map indexed by class id."""
-
-VOC_IGNORE_INDEX = 255
-"""Pascal VOC ignore label used in segmentation masks."""
+logger = logging.getLogger(__name__)
+supported_dataset = ["voc_2007_2012"]
+voc_path = Path("./dataset/voc-datasets")
 
 
-def _resolve_voc_roots(dataset_root: Path, years: Sequence[str]) -> list[Path]:
-    """Resolve Pascal VOC year directories.
+def init_dataset(
+    cfg: DictConfig,
+    split: str,
+    apply_augmentations: bool = False,
+) -> Dataset[Any]:
+    """Build one dataset split and attach dataset metadata.
 
     Args:
-        dataset_root: Root that contains `VOC2007` and `VOC2012`.
-        years: Pascal VOC year suffixes such as `("2007", "2012")`.
+        cfg: Dataset configuration.
+        split: Dataset split name.
+        apply_augmentations: Whether to enable training augmentations.
+
+    Returns:
+        Dataset[Any]: Configured dataset instance for the requested split.
     """
-    roots = [dataset_root / f"VOC{year}" for year in years]
-    missing = [str(root) for root in roots if not root.is_dir()]
-    if missing:
-        missing_joined = ", ".join(missing)
-        raise FileNotFoundError(f"Missing VOC dataset directories: {missing_joined}")
-    return roots
+    dataset_name = cfg.name
+    assert dataset_name in supported_dataset, f"Dataset {dataset_name} is not supported"
+    assert split in ["train", "val"]
+    transforms = build_transforms(cfg, apply_augmentations)
+    if dataset_name == "voc_2007_2012":
+        if split == "train":
+            dataset_l = [
+                VOCSemanticSegmentationDataset(
+                    voc_path / sub_name, split="trainval", transforms=transforms
+                )
+                for sub_name in ["VOC2007", "VOC2012"]
+            ]
+            dataset = ConcatDataset(dataset_l)
+        else:
+            dataset = VOCSemanticSegmentationDataset(
+                voc_path / "VOC2007", split="test", transforms=transforms
+            )
+    else:
+        raise NotImplementedError(f"Dataset {dataset_name} is not supported")
+    class_map = init_class_map(dataset_name)
+    palette_map = init_palette_map(dataset_name, class_map)
+    setattr(dataset, "class_map", class_map)
+    setattr(dataset, "palette_map", palette_map)
+    return dataset
 
 
-def build_voc_segmentation_transforms(
-    image_size: tuple[int, int],
-    train: bool,
-) -> T.Compose:
-    """Build joint image and mask transforms for semantic segmentation.
+def init_dataloader(cfg: DictConfig, split: str) -> DataLoader[Any]:
+    """Build one dataloader for the requested dataset split.
 
     Args:
-        image_size: Final `(height, width)` used by the model.
-        train: Whether to include training-time augmentation.
+        cfg: Dataset configuration.
+        split: Dataset split name.
+
+    Returns:
+        DataLoader[Any]: Configured dataloader for the split.
     """
-    transforms: list[torch.nn.Module] = []
-    if train:
-        transforms.append(T.RandomHorizontalFlip(p=0.5))
-    transforms.append(T.Resize(image_size))
+    assert split in ["train", "val"], f"Split {split} is not supported"
+    dataset = init_dataset(cfg, split, apply_augmentations=(split == "train"))
+    dataloader_kwargs = dict(cfg.dataloader)
+    dataloader_kwargs["drop_last"] = split == "train" and dataloader_kwargs.get("drop_last", False)
+    dataloader_kwargs["shuffle"] = split == "train"
+    dataloader = DataLoader(dataset, **dataloader_kwargs)
+    return dataloader
+
+
+def build_transforms(cfg: DictConfig, apply_augmentations: bool = False) -> T.Compose:
+    """Create the image and mask transform pipeline.
+
+    Args:
+        cfg: Dataset configuration.
+        apply_augmentations: Whether to include augmentation transforms.
+
+    Returns:
+        T.Compose: Composed torchvision v2 transform pipeline.
+    """
+    transforms: list[Any] = []
+    resized_b = False
+    if apply_augmentations:
+        for aug in cfg.augmentations:
+            if (
+                aug.get("_target_") == "torchvision.transforms.v2.RandomResizedCrop"
+                and aug.get("size") == cfg.input_size
+            ):
+                resized_b = True
+            transforms.append(instantiate(aug, _convert_="all"))
+    if not resized_b:
+        transforms.append(T.Resize(to_2tuple(cfg.input_size)))
+    mean = cfg.input_normalization.mean
+    std = cfg.input_normalization.std
+    transforms.extend(
+        [
+            T.ToDtype(torch.float32, scale=True),
+            T.Normalize(mean=mean, std=std),
+        ]
+    )
     return T.Compose(transforms)
 
 
-class VOCSemanticSegmentationDataset(Dataset[tuple[Tensor, Tensor]]):
-    """Load Pascal VOC semantic-segmentation samples.
+class VOCSemanticSegmentationDataset(Dataset):
+    """Load Pascal VOC semantic segmentation image and mask pairs."""
 
-    Args:
-        dataset_root: Root that contains the VOC year directories.
-        split: Dataset split from `ImageSets/Segmentation`.
-        years: Pascal VOC year suffixes such as `("2007", "2012")`.
-        transforms: Optional joint image and mask transforms.
-        mean: Channel-wise normalization mean for the image tensor.
-        std: Channel-wise normalization std for the image tensor.
-    """
-
-    def __init__(
-        self,
-        dataset_root: str | Path = "dataset/voc-datasets",
-        split: str = "train",
-        years: Sequence[str] = ("2007", "2012"),
-        transforms: T.Compose | None = None,
-        mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
-        std: tuple[float, float, float] = (0.229, 0.224, 0.225),
-    ) -> None:
-        self.dataset_root = Path(dataset_root)
-        self.split = split
-        self.transforms = transforms
-        self.mean = torch.tensor(mean, dtype=torch.float32).view(3, 1, 1)
-        self.std = torch.tensor(std, dtype=torch.float32).view(3, 1, 1)
-        self.samples: list[tuple[Path, Path]] = []
-
-        for voc_root in _resolve_voc_roots(self.dataset_root, years):
-            split_path = voc_root / "ImageSets" / "Segmentation" / f"{split}.txt"
-            if not split_path.is_file():
-                raise FileNotFoundError(f"Missing split file: {split_path}")
-
-            image_dir = voc_root / "JPEGImages"
-            mask_dir = voc_root / "SegmentationClass"
-            with split_path.open("r", encoding="utf-8") as handle:
-                image_ids = [line.strip() for line in handle if line.strip()]
-
-            for image_id in image_ids:
-                image_path = image_dir / f"{image_id}.jpg"
-                mask_path = mask_dir / f"{image_id}.png"
-                if image_path.is_file() and mask_path.is_file():
-                    self.samples.append((image_path, mask_path))
-
-        if not self.samples:
-            raise RuntimeError(
-                f"No VOC segmentation samples found for split={split!r} under {self.dataset_root}"
-            )
-
-    def __len__(self) -> int:
-        """Return the number of segmentation samples.
+    def __init__(self, dataset_path: Path, split: str, transforms: T.Compose | None) -> None:
+        """Initialize dataset metadata and available samples.
 
         Args:
-            None.
+            dataset_path: Root directory for one Pascal VOC dataset split.
+            split: Split file stem to read from ``ImageSets/Segmentation``.
+            transforms: Optional transform pipeline applied to image and mask.
+        """
+        self.dataset_path = dataset_path
+        self.split = split
+        self.transforms = transforms
+        self.samples: list[tuple[Path, Path]] = []
+
+        img_id_file = dataset_path / "ImageSets" / "Segmentation" / f"{split}.txt"
+        with open(img_id_file, "r") as f:
+            img_ids = [line.strip() for line in f.readlines()]
+
+        for img_id in img_ids:
+            img_path = dataset_path / "JPEGImages" / f"{img_id}.jpg"
+            mask_path = dataset_path / "SegmentationClass" / f"{img_id}.png"
+            if not img_path.is_file():
+                logger.warning(f"Missing image for {img_id}")
+                continue
+            if not mask_path.is_file():
+                logger.warning(f"Missing mask for {img_id}")
+                continue
+            self.samples.append((img_path, mask_path))
+
+    def __len__(self) -> int:
+        """Return the number of valid image and mask pairs.
+
+        Returns:
+            int: Dataset length.
         """
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor]:
-        """Load a normalized image tensor and its segmentation mask.
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Load one image and segmentation mask pair.
 
         Args:
-            index: Position of the sample inside the dataset.
+            idx: Sample index.
+
+        Returns:
+            tuple[tv_tensors.Image, tv_tensors.Mask]: Loaded image and mask tensors.
         """
-        image_path, mask_path = self.samples[index]
-        image = read_image(str(image_path))
-        mask_np = np.array(Image.open(mask_path), dtype=np.uint8, copy=True)
-        mask = torch.from_numpy(mask_np)
-
-        image_tensor = tv_tensors.Image(image)
-        mask_tensor = tv_tensors.Mask(mask)
+        img_path, mask_path = self.samples[idx]
+        img = read_image(str(img_path))
+        img = tv_tensors.Image(img)
+        mask = Image.open(mask_path)
+        assert mask.mode == "P", f"{str(mask_path)!r} is not a palette image, got {mask.mode=}"
+        mask_np = np.array(mask, dtype=np.uint8)
+        mask = tv_tensors.Mask(torch.from_numpy(mask_np))
         if self.transforms is not None:
-            image_tensor, mask_tensor = self.transforms(image_tensor, mask_tensor)
-
-        image_float = image_tensor.to(torch.float32).div_(255.0)
-        image_float = (image_float - self.mean) / self.std
-        mask_long = mask_tensor.to(torch.long)
-        return image_float, mask_long
+            img, mask = self.transforms(img, mask)
+        return img, mask.long()
 
 
-def segmentation_collate_fn(
-    batch: Sequence[tuple[Tensor, Tensor]],
-) -> tuple[Tensor, Tensor]:
-    """Stack segmentation samples into dense mini-batches.
+def init_class_map(dataset_name: str) -> bidict[int, str]:
+    """Build the class-id to class-name mapping for one dataset.
 
     Args:
-        batch: Sequence of `(image, mask)` samples.
+        dataset_name: Supported dataset name.
+
+    Returns:
+        bidict[int, str]: Bi-directional mapping of class IDs and class names.
     """
-    images, masks = zip(*batch, strict=True)
-    return torch.stack(images, dim=0), torch.stack(masks, dim=0)
+    assert dataset_name in supported_dataset
+    if dataset_name == "voc_2007_2012":
+        voc_classes = [
+            "background",
+            "aeroplane",
+            "bicycle",
+            "bird",
+            "boat",
+            "bottle",
+            "bus",
+            "car",
+            "cat",
+            "chair",
+            "cow",
+            "diningtable",
+            "dog",
+            "horse",
+            "motorbike",
+            "person",
+            "pottedplant",
+            "sheep",
+            "sofa",
+            "train",
+            "tvmonitor",
+        ]
+        class_map = bidict({i: cls for i, cls in enumerate(voc_classes)})
+        class_map[255] = "ignore"
+        return class_map
+    return bidict()
 
 
-def build_voc_segmentation_dataloader(
-    dataset_root: str | Path = "dataset/voc-datasets",
-    split: str = "train",
-    image_size: tuple[int, int] = (512, 512),
-    batch_size: int = 8,
-    num_workers: int = 4,
-    years: Sequence[str] = ("2007", "2012"),
-) -> DataLoader[tuple[Tensor, Tensor]]:
-    """Build a Pascal VOC semantic-segmentation dataloader.
+def init_palette_map(
+    dataset_name: str,
+    class_map: bidict[int, str],
+) -> dict[int, torch.Tensor]:
+    """Build the RGB palette lookup for dataset class IDs.
 
     Args:
-        dataset_root: Root that contains the VOC year directories.
-        split: Dataset split from `ImageSets/Segmentation`.
-        image_size: Final `(height, width)` used by the model.
-        batch_size: Number of samples per batch.
-        num_workers: Worker count used by the dataloader.
-        years: Pascal VOC year suffixes such as `("2007", "2012")`.
+        dataset_name: Supported dataset name.
+        class_map: Class ID to name mapping.
+
+    Returns:
+        dict[int, torch.Tensor]: Mapping from class ID to RGB color tensor.
     """
-    dataset = VOCSemanticSegmentationDataset(
-        dataset_root=dataset_root,
-        split=split,
-        years=years,
-        transforms=build_voc_segmentation_transforms(
-            image_size=image_size,
-            train=split == "train",
-        ),
+    assert dataset_name in supported_dataset
+    sample_mask_path = next((voc_path / "VOC2012" / "SegmentationClass").glob("*.png"))
+    sample_mask = Image.open(sample_mask_path)
+    assert sample_mask.mode == "P", f"{sample_mask_path} is not a palette image"
+    palette = sample_mask.getpalette()
+    assert palette is not None, f"{sample_mask_path} does not have a palette"
+    palette = torch.tensor(
+        [palette[i : i + 3] for i in range(0, len(palette), 3)],
+        dtype=torch.uint8,
     )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=split == "train",
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
-        collate_fn=segmentation_collate_fn,
-    )
+    return {class_id: palette[class_id] for class_id in class_map if class_id != 255}
 
 
-def decode_voc_mask(mask: Tensor) -> Tensor:
-    """Convert a class-index mask into a color image.
-
-    Args:
-        mask: Segmentation mask tensor with shape `(H, W)`.
-    """
-    mask_long = mask.to(torch.long)
-    color_mask = torch.zeros((*mask_long.shape, 3), dtype=torch.uint8)
-
-    valid = (mask_long >= 0) & (mask_long < len(VOC_CLASSES))
-    color_mask[valid] = VOC_COLOR_MAP[mask_long[valid]]
-    color_mask[mask_long == VOC_IGNORE_INDEX] = torch.tensor(
-        [255, 255, 255], dtype=torch.uint8
-    )
+def decode_mask(mask: torch.Tensor, palette: dict[int, torch.Tensor]) -> torch.Tensor:
+    assert mask.dtype == torch.uint8 and mask.ndim == 2, "mask must be uint8 and 2D"
+    color_mask = torch.zeros(mask.shape[0], mask.shape[1], 3, dtype=torch.uint8)
+    for class_id, color in palette.items():
+        color_mask[mask == class_id] = color
     return color_mask
 
 
-def plot_voc_samples(
-    dataset: Dataset[tuple[Tensor, Tensor]],
-    sample_count: int = 4,
-    output_path: str | Path | None = None,
-) -> Path | None:
-    """Plot image, mask, and overlay panels for a few VOC samples.
+def plot_samples(
+    images: torch.Tensor,
+    masks: torch.Tensor,
+    palette: dict[int, torch.Tensor],
+    predictions: torch.Tensor | None = None,
+    overlay_r: float = 0.3,
+) -> None:
+    """Visualize images with ground-truth and optional predicted masks.
 
     Args:
-        dataset: Dataset that returns `(image, mask)` pairs.
-        sample_count: Number of samples to render from the start of the dataset.
-        output_path: Optional file path used to save the rendered figure.
+        images: Batch of image tensors shaped ``[batch, 3, height, width]``.
+        masks: Batch of mask tensors shaped ``[batch, height, width]``.
+        palette: Mapping from class ID to RGB color tensor.
+        predictions: Optional predicted masks shaped ``[batch, height, width]``.
+        overlay_r: Image blending ratio used for overlays.
+
+    Returns:
+        None: Displays the visualization and closes the figure.
     """
-    figure, axes = plt.subplots(sample_count, 3, figsize=(12, 4 * sample_count))
-    axes_array = np.atleast_2d(axes)
-
-    for row in range(sample_count):
-        image, mask = dataset[row]
-        image_vis = image.detach().cpu()
-        image_vis = image_vis * torch.tensor((0.229, 0.224, 0.225)).view(3, 1, 1)
-        image_vis = image_vis + torch.tensor((0.485, 0.456, 0.406)).view(3, 1, 1)
-        image_vis = image_vis.clamp(0.0, 1.0).permute(1, 2, 0).numpy()
-
-        mask_vis = decode_voc_mask(mask.detach().cpu()).numpy()
-        overlay = 0.55 * image_vis + 0.45 * (mask_vis.astype(np.float32) / 255.0)
-
-        axes_array[row, 0].imshow(image_vis)
-        axes_array[row, 0].set_title("image")
-        axes_array[row, 1].imshow(mask_vis)
-        axes_array[row, 1].set_title("mask")
-        axes_array[row, 2].imshow(overlay)
-        axes_array[row, 2].set_title("overlay")
-
-        for col in range(3):
-            axes_array[row, col].axis("off")
-
-    figure.tight_layout()
-    if output_path is not None:
-        output = Path(output_path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(output, dpi=180, bbox_inches="tight")
-        plt.close(figure)
-        return output
-
+    assert images.ndim == 4 and images.size(1) == 3, "images must be B x 3 x H x W"
+    assert masks.ndim == 3 and masks.size(0) == images.size(0), "masks must be B x H x W"
+    assert predictions is None or predictions.ndim == 3 and predictions.size(0) == images.size(0), (
+        "predictions must be B x H x W"
+    )
+    n = images.size(0)
+    fig, axes = plt.subplots(n, 2 if predictions is None else 3, figsize=(10, 10))
+    axes = np.atleast_2d(axes)
+    for i in range(n):
+        image_i = images[i].permute(1, 2, 0).numpy()
+        image_i = (image_i - image_i.min()) / (image_i.max() - image_i.min() + 1e-8)
+        axes[i, 0].imshow(image_i)
+        axes[i, 0].axis("off")
+        mask_i = decode_mask(masks[i].to(torch.uint8), palette).numpy() / 255.0
+        overlay_i = image_i * overlay_r + mask_i * (1 - overlay_r)
+        axes[i, 1].imshow(overlay_i)
+        axes[i, 1].axis("off")
+        if predictions is not None:
+            pred_i = predictions[i]
+            pred_i = decode_mask(pred_i.to(torch.uint8), palette).numpy() / 255.0
+            overlay_pred_i = image_i * overlay_r + pred_i * (1 - overlay_r)
+            axes[i, 2].imshow(overlay_pred_i)
+            axes[i, 2].axis("off")
+    fig.tight_layout()
     plt.show()
-    plt.close(figure)
-    return None
-
-
-if __name__ == "__main__":
-    dataset = VOCSemanticSegmentationDataset(
-        split="train",
-        transforms=build_voc_segmentation_transforms(image_size=(512, 512), train=True),
-    )
-    saved_path = plot_voc_samples(
-        dataset=dataset,
-        sample_count=4,
-        output_path="cache/voc-segmentation-samples.png",
-    )
-    print(f"Saved sample plot to {saved_path}")
