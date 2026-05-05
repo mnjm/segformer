@@ -1,0 +1,67 @@
+defaults:
+    - model: segformer-b0
+    - _self_
+
+n_epochs: 300
+grad_accum_steps: 4
+init_from: scratch
+device_type: cuda
+torch_compile: false
+enable_tf32: true
+clip_grad_norm_1: true
+autocast_dtype: bf16
+save_every_epoch: 20
+val_every_epoch: 10
+show_batch_initially: true
+
+dataset:
+    name: voc_2007_2012
+    input_size: 512
+    dataloader:
+        batch_size: 8
+        num_workers: 0
+        pin_memory: true
+        drop_last: true
+    augmentations:
+        - _target_: torchvision.transforms.v2.RandomResizedCrop
+          size: ${dataset.input_size}
+          scale: [0.5, 2.0]
+          ratio: [0.75, 1.33]
+        - _target_: torchvision.transforms.v2.RandomHorizontalFlip
+          p: 0.5
+        - _target_: torchvision.transforms.v2.ColorJitter
+          brightness: 0.2
+          contrast: 0.2
+          saturation: 0.2
+          hue: 0.05
+    input_normalization:
+        mean: [0.485, 0.456, 0.406]
+        std: [0.229, 0.224, 0.225]
+
+optimizer:
+    type: adamw
+    lr: 5e-6
+    betas: [0.9, 0.99]
+    weight_decay: 0.01
+    eps: 1e-8
+    fused: true
+
+lr_scheduler:
+    type: poly_with_linear_warmup
+    warmup_pct: 0.075 # Given Cityscapes is trained for 20k steps, noticed code had 1500 warmpup steps so roughly 1500/20000 = 0.075
+    warmup_ratio: 1e-6
+    power: 1.0
+    min_lr: 0.0
+
+logging:
+    log_dir: ./logs
+    wandb:
+        enable: false
+        project: segformer
+
+hydra:
+    job:
+        name: ${model.name}-${now_ist:%d-%m-%y-%H%M%S}
+    run:
+        dir: ${logging.log_dir}/${hydra.job.name}
+    output_subdir: config

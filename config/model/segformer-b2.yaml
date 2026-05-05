@@ -1,3 +1,4 @@
+name: segformer-b2
 img_size: 512
 in_chals: 3
 num_classes: 150

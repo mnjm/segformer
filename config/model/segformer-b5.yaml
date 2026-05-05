@@ -1,3 +1,4 @@
+name: segformer-b5
 img_size: 512
 in_chals: 3
 num_classes: 150
@@ -8,7 +9,7 @@ qkv_bias: true
 drop_rate: 0.0
 attn_drop_rate: 0.0
 drop_path_rate: 0.1
-depths: [3, 8, 27, 3]
+depths: [3, 6, 40, 3]
 sr_ratios: [8, 4, 2, 1]
 decoder_dim: 768
 decoder_drop_rate: 0.1

@@ -7,20 +7,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def to_2tuple(x):
+def to_2tuple(x: int | tuple[int, int] | list[int]) -> tuple[int, int]:
     """
     Return x as a 2-tuple; if x is scalar, return (x, x).
 
     Args:
         x: Scalar or sequence value.
+
+    Returns:
+        tuple[int, int]: Two-element tuple representation of the input size.
     """
-    return x if isinstance(x, (list, tuple)) else (x, x)
+    if isinstance(x, tuple):
+        return x
+    if isinstance(x, list):
+        return x[0], x[1]
+    return x, x
 
 
 class OverlapPatchMerging(nn.Module):
     """Convert an image tensor into overlapping patch embeddings."""
 
-    def __init__(self, img_size=224, patch_size=7, stride=4, in_chans=3, embed_dim=768):
+    def __init__(
+        self,
+        img_size: int | tuple[int, int] = 224,
+        patch_size: int | tuple[int, int] = 7,
+        stride: int = 4,
+        in_chans: int = 3,
+        embed_dim: int = 768,
+    ) -> None:
         """Initialize the projection and normalization layers for patch embedding.
 
         Args:
@@ -29,6 +43,9 @@ class OverlapPatchMerging(nn.Module):
             stride: Convolution stride between adjacent patches.
             in_chans: Number of input channels.
             embed_dim: Output embedding dimension per patch.
+
+        Returns:
+            None: Initializes the patch projection layers.
         """
         super().__init__()
         img_size = to_2tuple(img_size)
@@ -40,11 +57,14 @@ class OverlapPatchMerging(nn.Module):
         )
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, int, int]:
         """Project an image into flattened patch tokens.
 
         Args:
             x: Input image tensor of shape ``[batch, channels, height, width]``.
+
+        Returns:
+            tuple[torch.Tensor, int, int]: Tokens and their spatial height and width.
         """
         x = self.proj(x)
         _, _, H, W = x.shape
@@ -56,7 +76,7 @@ class OverlapPatchMerging(nn.Module):
 class DropPath(nn.Module):
     """Apply stochastic depth to a residual branch during training."""
 
-    def __init__(self, drop_prob: float):
+    def __init__(self, drop_prob: float) -> None:
         """Store the stochastic depth probability.
 
         Args:
@@ -65,11 +85,14 @@ class DropPath(nn.Module):
         super().__init__()
         self.drop_prob = drop_prob
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Randomly drop full residual paths for the current batch.
 
         Args:
             x: Input tensor to regularize.
+
+        Returns:
+            torch.Tensor: Regularized residual branch output.
         """
         drop_prob = self.drop_prob
         if drop_prob == 0.0 or not self.training:
@@ -86,14 +109,14 @@ class EfficientSelfAttention(nn.Module):
 
     def __init__(
         self,
-        dim,
-        num_heads,
-        qkv_bias=False,
-        attn_drop_rate=0.0,
-        proj_drop_rate=0.0,
-        sr_ratio=1,
-        use_sdpa_attn=True,
-    ):
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = False,
+        attn_drop_rate: float = 0.0,
+        proj_drop_rate: float = 0.0,
+        sr_ratio: int = 1,
+        use_sdpa_attn: bool = True,
+    ) -> None:
         """Initialize attention projection layers and reduction settings.
 
         Args:
@@ -104,19 +127,18 @@ class EfficientSelfAttention(nn.Module):
             proj_drop_rate: Dropout rate applied after the output projection.
             sr_ratio: Spatial reduction ratio for keys and values.
             use_sdpa_attn: Whether to use scaled dot-product attention when available.
+
+        Returns:
+            None: Initializes attention projection modules.
         """
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        assert dim % num_heads == 0, (
-            f"dim {dim} should be divisible by num_heads {num_heads}"
-        )
+        assert dim % num_heads == 0, f"dim {dim} should be divisible by num_heads {num_heads}"
         self.scale = head_dim**-0.5
         self.attn_drop_rate = attn_drop_rate
-        self.use_sdpa_attn = use_sdpa_attn and hasattr(
-            F, "scaled_dot_product_attention"
-        )
+        self.use_sdpa_attn = use_sdpa_attn and hasattr(F, "scaled_dot_product_attention")
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
@@ -130,19 +152,20 @@ class EfficientSelfAttention(nn.Module):
             self.sr = nn.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
             self.norm = nn.LayerNorm(dim)
 
-    def forward(self, x, H, W):
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         """Apply self-attention to a sequence of image tokens.
 
         Args:
             x: Token tensor of shape ``[batch, tokens, channels]``.
             H: Feature map height corresponding to the token sequence.
             W: Feature map width corresponding to the token sequence.
+
+        Returns:
+            torch.Tensor: Attention output with the same shape as ``x``.
         """
         B, N, C = x.shape
         q = (
-            self.q(x)
-            .reshape(B, N, self.num_heads, C // self.num_heads)
-            .permute(0, 2, 1, 3)
+            self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         )  # B, num_heads, tokens, head_dim
 
         if self.sr_ratio > 1:
@@ -164,9 +187,7 @@ class EfficientSelfAttention(nn.Module):
 
         if self.use_sdpa_attn:
             drop_p = self.attn_drop_rate if self.training else 0.0
-            x = F.scaled_dot_product_attention(
-                q, k, v, is_causal=False, dropout_p=drop_p
-            )
+            x = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=drop_p)
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale
             attn = attn.softmax(dim=-1)
@@ -182,24 +203,28 @@ class EfficientSelfAttention(nn.Module):
 class DWConv(nn.Module):
     """Apply depthwise convolution inside the MLP token mixing path."""
 
-    def __init__(self, dim):
+    def __init__(self, dim: int) -> None:
         """Initialize the depthwise convolution layer.
 
         Args:
             dim: Number of input and output channels.
+
+        Returns:
+            None: Initializes the depthwise convolution layer.
         """
         super().__init__()
-        self.dwconv = nn.Conv2d(
-            dim, dim, kernel_size=3, stride=1, padding=1, bias=True, groups=dim
-        )
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, bias=True, groups=dim)
 
-    def forward(self, x, H, W):
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         """Reshape tokens to a feature map, convolve, and flatten back.
 
         Args:
             x: Token tensor of shape ``[batch, tokens, channels]``.
             H: Feature map height corresponding to the token sequence.
             W: Feature map width corresponding to the token sequence.
+
+        Returns:
+            torch.Tensor: Token tensor after depthwise convolution mixing.
         """
         B, N, C = x.shape
         x = x.transpose(1, 2).view(B, C, H, W)
@@ -213,12 +238,12 @@ class MixFFN(nn.Module):
 
     def __init__(
         self,
-        in_features,
-        hidden_features,
-        out_features,
-        act_layer=nn.GELU,
-        drop_rate=0.0,
-    ):
+        in_features: int,
+        hidden_features: int,
+        out_features: int,
+        act_layer: type[nn.Module] = nn.GELU,
+        drop_rate: float = 0.0,
+    ) -> None:
         """Initialize the MLP projection, activation, and dropout layers.
 
         Args:
@@ -227,6 +252,9 @@ class MixFFN(nn.Module):
             out_features: Output token channel dimension.
             act_layer: Activation layer class used between projections.
             drop_rate: Dropout rate applied after each projection.
+
+        Returns:
+            None: Initializes the feed-forward block layers.
         """
         super().__init__()
         out_features = out_features or in_features
@@ -237,13 +265,16 @@ class MixFFN(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop_rate)
 
-    def forward(self, x, H, W):
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         """Transform token features with linear and depthwise operations.
 
         Args:
             x: Token tensor of shape ``[batch, tokens, channels]``.
             H: Feature map height corresponding to the token sequence.
             W: Feature map width corresponding to the token sequence.
+
+        Returns:
+            torch.Tensor: Output token tensor after feed-forward mixing.
         """
         x = self.fc1(x)
         x = self.dwconv(x, H, W)
@@ -259,17 +290,17 @@ class Block(nn.Module):
 
     def __init__(
         self,
-        dim,
-        num_heads,
-        mlp_ratio,
-        qkv_bias=True,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
-        drop_path_rate=0.0,
-        act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
-        sr_ratio=1,
-    ):
+        dim: int,
+        num_heads: int,
+        mlp_ratio: int,
+        qkv_bias: bool = True,
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        act_layer: type[nn.Module] = nn.GELU,
+        norm_layer: type[nn.Module] = nn.LayerNorm,
+        sr_ratio: int = 1,
+    ) -> None:
         """Initialize normalization, attention, and MLP submodules.
 
         Args:
@@ -283,6 +314,9 @@ class Block(nn.Module):
             act_layer: Activation layer class used by the MLP.
             norm_layer: Normalization layer class used before each branch.
             sr_ratio: Spatial reduction ratio used by attention.
+
+        Returns:
+            None: Initializes the transformer block modules.
         """
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -297,17 +331,18 @@ class Block(nn.Module):
 
         self.drop_path = DropPath(drop_path_rate)
         self.norm2 = norm_layer(dim)
-        self.mlp = MixFFN(
-            dim, dim * mlp_ratio, dim, act_layer=act_layer, drop_rate=drop_rate
-        )
+        self.mlp = MixFFN(dim, dim * mlp_ratio, dim, act_layer=act_layer, drop_rate=drop_rate)
 
-    def forward(self, x, H, W):
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         """Apply attention and MLP residual updates to the token sequence.
 
         Args:
             x: Token tensor of shape ``[batch, tokens, channels]``.
             H: Feature map height corresponding to the token sequence.
             W: Feature map width corresponding to the token sequence.
+
+        Returns:
+            torch.Tensor: Updated token tensor after both residual branches.
         """
         x = x + self.drop_path(self.attn(self.norm1(x), H, W))
         x = x + self.drop_path(self.mlp(self.norm2(x), H, W))
@@ -317,21 +352,36 @@ class Block(nn.Module):
 class MixTransformerStage(nn.Module):
     """Run one encoder stage while preserving token and spatial metadata."""
 
-    def __init__(self, patch_embed, blocks, norm):
+    def __init__(
+        self,
+        patch_embed: OverlapPatchMerging,
+        blocks: nn.ModuleList,
+        norm: nn.Module,
+    ) -> None:
         """Store the stage modules in execution order.
 
         Args:
             patch_embed: Patch embedding module producing ``(x, H, W)``.
             blocks: Transformer blocks operating on token sequences.
             norm: Final normalization layer for stage outputs.
+
+        Returns:
+            None: Stores the stage submodules.
         """
         super().__init__()
         self.patch_embed = patch_embed
         self.blocks = blocks
         self.norm = norm
 
-    def forward(self, x):
-        """Apply patch embedding, transformer blocks, and stage normalization."""
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+        """Apply patch embedding, transformer blocks, and stage normalization.
+
+        Args:
+            x: Input feature map tensor for the current stage.
+
+        Returns:
+            tuple[torch.Tensor, int, int]: Stage tokens and their spatial height and width.
+        """
         x, H, W = self.patch_embed(x)
         for block in self.blocks:
             x = block(x, H, W)
@@ -344,20 +394,20 @@ class MixTransformer(nn.Module):
 
     def __init__(
         self,
-        img_size=224,
-        in_chals=3,
-        num_classes=1000,
-        embed_dims=[32, 64, 160, 256],
-        num_heads=[1, 2, 5, 8],
-        mlp_ratios=[4, 4, 4, 4],
-        qkv_bias=False,
-        drop_rate=0.0,
-        attn_drop_rate=0.0,
-        drop_path_rate=0.0,
-        norm_layer=nn.LayerNorm,
-        depths=[2, 2, 2, 2],
-        sr_ratios=[8, 4, 2, 1],
-    ):
+        img_size: int = 224,
+        in_chals: int = 3,
+        num_classes: int = 1000,
+        embed_dims: list[int] = [32, 64, 160, 256],
+        num_heads: list[int] = [1, 2, 5, 8],
+        mlp_ratios: list[int] = [4, 4, 4, 4],
+        qkv_bias: bool = False,
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        norm_layer: type[nn.Module] = nn.LayerNorm,
+        depths: list[int] = [2, 2, 2, 2],
+        sr_ratios: list[int] = [8, 4, 2, 1],
+    ) -> None:
         """Initialize the hierarchical Mix Transformer encoder.
 
         Args:
@@ -374,6 +424,9 @@ class MixTransformer(nn.Module):
             norm_layer: Normalization layer class used in the encoder.
             depths: Number of transformer blocks in each stage.
             sr_ratios: Spatial reduction ratios for the attention layers.
+
+        Returns:
+            None: Initializes the hierarchical encoder stages.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -387,9 +440,7 @@ class MixTransformer(nn.Module):
 
         stages = []
         dims = [in_chals] + embed_dims
-        depth_drop_rates = [
-            x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))
-        ]
+        depth_drop_rates = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
         cur = 0
         for l_i in range(len(depths)):
             stages.append(
@@ -430,11 +481,14 @@ class MixTransformer(nn.Module):
         self.apply(self._init_weights)
 
     @staticmethod
-    def _init_weights(m: nn.Module):
+    def _init_weights(m: nn.Module) -> None:
         """Initialize supported module weights in place.
 
         Args:
             m: Module instance to initialize.
+
+        Returns:
+            None: Mutates supported module weights in place.
         """
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
@@ -450,11 +504,14 @@ class MixTransformer(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0.0)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor] | torch.Tensor:
         """Encode an input image into stage outputs or class logits.
 
         Args:
             x: Input image tensor of shape ``[batch, channels, height, width]``.
+
+        Returns:
+            list[torch.Tensor] | torch.Tensor: Stage feature maps or classification logits.
         """
         B = x.shape[0]
         outs = []

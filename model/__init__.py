@@ -1,12 +1,19 @@
 """SegFormer model definitions and configuration."""
 
+import logging
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from omegaconf import DictConfig
 
 from .decoder import SegFormerDecoder
+from .hf_mapper import build_encoder_state_dict, load_hf_model
 from .mix_transformer import MixTransformer
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -14,6 +21,7 @@ class SegFormerConfig:
     """Store SegFormer encoder and decoder settings.
 
     Args:
+        name: Model name (e.g., "segformer-b0").
         img_size: Input image size used to configure the encoder stages.
         in_chals: Number of input image channels.
         num_classes: Number of segmentation classes to predict.
@@ -31,6 +39,7 @@ class SegFormerConfig:
         decoder_drop_rate: Dropout rate applied before the segmentation classifier.
     """
 
+    name: str = "segformer-b0"
     img_size: int = 224
     in_chals: int = 3
     num_classes: int = 150
@@ -51,14 +60,19 @@ class SegFormerConfig:
 class SegFormer(nn.Module):
     """Build a SegFormer model from a transformer encoder and segmentation decoder."""
 
-    def __init__(self, cfg: SegFormerConfig):
+    def __init__(self, cfg: SegFormerConfig, loss_fn: nn.Module | None = None) -> None:
         """Initialize the SegFormer model components.
 
         Args:
             cfg: SegFormer configuration values for the encoder and decoder.
+            loss_fn: Optional segmentation loss module.
+
+        Returns:
+            None: Initializes the encoder and decoder modules.
         """
         super().__init__()
         self.cfg = cfg
+        self.loss_fn = loss_fn
 
         self.encoder = MixTransformer(
             img_size=cfg.img_size,
@@ -83,18 +97,111 @@ class SegFormer(nn.Module):
             num_classes=cfg.num_classes,
         )
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run segmentation inference on an input batch.
 
         Args:
             x: Input image tensor of shape ``[batch, channels, height, width]``.
+            y: Optional target mask tensor for loss computation.
+
+        Returns:
+            torch.Tensor | tuple[torch.Tensor, torch.Tensor]: Logits alone, or logits and loss.
         """
         features = self.encoder(x)
-        return self.decoder(features)
+        logits = self.decoder(features)
+        logits = F.interpolate(logits, size=x.shape[2:], mode="bilinear", align_corners=False)
+        if y is not None and self.loss_fn is not None:
+            loss = self.loss_fn(logits, y)
+            return logits, loss
+        return logits
+
+    def load_pretrained_encoder(self) -> None:
+        """Load pretrained Hugging Face weights into the local encoder.
+
+        Returns:
+            None: Updates encoder parameters in place.
+        """
+        logger.info(f"Loading pretrained encoder for {self.cfg.name}")
+        hf_model = load_hf_model(self.cfg.name)
+        incompatible = self.encoder.load_state_dict(
+            build_encoder_state_dict(hf_model),
+            strict=True,
+        )
+        missing_keys = incompatible.missing_keys
+        unexpected_keys = incompatible.unexpected_keys
+        assert len(missing_keys) == 0, f"Missing keys: {missing_keys}"
+        assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
+
+    def configure_optimizer(
+        self,
+        optim_cfg: DictConfig,
+        device: torch.device,
+    ) -> torch.optim.Optimizer:
+        """Build an optimizer with SegFormer-style parameter-wise settings.
+
+        Args:
+            optim_cfg: Config with optimizer type, base LR, and decay settings.
+            device: Used to decide fused optimizer on CUDA.
+
+        Returns:
+            torch.optim.Optimizer: Configured optimizer instance.
+        """
+        supported_optimizers_map = {"adamw": torch.optim.AdamW}
+        assert optim_cfg.type in supported_optimizers_map, (
+            f"{optim_cfg.type=} optimizer not supported"
+        )
+        optim_init = supported_optimizers_map[optim_cfg.type]
+
+        optim_cfg.fused = getattr(optim_cfg, "fused", False) and device.type == "cuda"
+        weight_decay = getattr(optim_cfg, "weight_decay", 1e-2)
+        lr = optim_cfg.lr
+
+        optim_groups: list[dict[str, Any]] = []
+
+        def build_weight_decay_param_groups(
+            params: list[nn.Parameter],
+            weight_decay: float,
+            lr: float,
+        ) -> list[dict[str, Any]]:
+            """Split parameters into decay and no-decay optimizer groups.
+
+            Args:
+                params: Parameters to group.
+                weight_decay: Weight decay applied to matrix-like parameters.
+                lr: Learning rate applied to both parameter groups.
+
+            Returns:
+                list[dict[str, Any]]: Optimizer parameter group dictionaries.
+            """
+            decay_parmas = [p for p in params if p.dim() >= 2]
+            no_decay_parmas = [p for p in params if p.dim() < 2]
+            return [
+                {"params": decay_parmas, "weight_decay": weight_decay, "lr": lr},
+                {"params": no_decay_parmas, "weight_decay": 0.0, "lr": lr},
+            ]
+
+        encoder_params = [p for p in self.encoder.parameters() if p.requires_grad]
+        decoder_params = [p for p in self.decoder.parameters() if p.requires_grad]
+        optim_groups.extend(
+            build_weight_decay_param_groups(encoder_params, lr=lr, weight_decay=weight_decay)
+        )
+        optim_groups.extend(
+            build_weight_decay_param_groups(decoder_params, lr=lr * 10.0, weight_decay=weight_decay)
+        )
+
+        kwargs = cast(dict[str, Any], dict(optim_cfg))
+        del kwargs["type"]
+        optimizer = optim_init(optim_groups, **kwargs)
+        return optimizer
 
 
 if __name__ == "__main__":
     model = SegFormer(SegFormerConfig())
+    model.load_pretrained_encoder()
     print(sum([x.numel() for x in model.parameters()]))
     x = torch.randn(1, 3, 224, 224)
     output = model(x)
