@@ -46,7 +46,9 @@ def torch_get_device(device_type: str) -> torch.device:
             "auto" but CUDA is available (to avoid accidental CPU fallback).
     """
     if device_type == "cuda":
-        assert torch.cuda.is_available(), "CUDA is not available :(, `python train.py +device=auto`"
+        assert torch.cuda.is_available(), (
+            "CUDA is not available :(, use `uv run train.py device_type=auto`"
+        )
         device = torch.device("cuda")
     elif device_type == "auto":
         assert not torch.cuda.is_available(), "CUDA is available :), switch to cuda"

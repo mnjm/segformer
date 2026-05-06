@@ -1,4 +1,4 @@
-"""Entrypoint for SegFormer training"""
+"""Entrypoint for SegFormer training."""
 
 import logging
 import math
@@ -26,9 +26,7 @@ from utils import (
 )
 
 OmegaConf.register_new_resolver("now_ist", get_ist_time_now)
-
 logger = logging.getLogger("train")
-
 seed = 42
 
 
@@ -43,27 +41,22 @@ def main(cfg: DictConfig) -> None:
     torch_autocast_dtype = {"f32": torch.float32, "bf16": torch.bfloat16}[cfg.autocast_dtype]
     torch_set_seed(42)
 
-    train_dataloader = init_dataloader(cfg.dataset, "train")
-    val_dataloader = init_dataloader(cfg.dataset, "val")
-    class_map = getattr(train_dataloader.dataset, "class_map")
-    palette_map = getattr(train_dataloader.dataset, "palette_map")
+    train_loader = init_dataloader(cfg, "train")
+    val_loader = init_dataloader(cfg, "val")
+    palette_map = getattr(train_loader.dataset, "palette_map")
     if getattr(cfg, "show_batch_initially", False):
-        sample = next(iter(train_dataloader))
+        sample = next(iter(train_loader))
         plot_samples(sample[0], sample[1], cast(dict[int, torch.Tensor], palette_map))
 
-    start_epoch = 1
-    wandb_id = None
-    ignore_index = class_map.inv.get("ignore", None)
-    num_classes = len(class_map)
-    if ignore_index is not None:
-        num_classes -= 1
-        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=ignore_index)
-    else:
-        loss_fn = torch.nn.CrossEntropyLoss()
     ckpt: dict[str, Any] | None = None
+    start_epoch = 1
+    ignore_idx = getattr(cfg.dataset, "ignore_idx", None)
+    num_classes = len(getattr(train_loader.dataset, "class_map", {}))
+    assert num_classes > 0, f"Expected num_classes > 0, got {num_classes}"
+    wandb_id = None
     if cfg.init_from == "scratch":
         model_cfg = SegFormerConfig(**cfg.model)
-        model = SegFormer(model_cfg, loss_fn=loss_fn)
+        model = SegFormer(model_cfg, ignore_idx=ignore_idx)
         model.load_pretrained_encoder()
         model.to(device)
     else:
@@ -71,7 +64,7 @@ def main(cfg: DictConfig) -> None:
         ckpt = cast(dict[str, Any], loaded_ckpt)
         ckpt_config = cast(DictConfig, ckpt["config"])
         model_cfg = SegFormerConfig(**ckpt_config.model)
-        model = SegFormer(model_cfg, loss_fn=loss_fn)
+        model = SegFormer(model_cfg, ignore_idx=ignore_idx)
         model.to(device)
         model.load_state_dict(torch_compile_ckpt_fix(ckpt["model"]))
         logger.info(f"Loaded checkpoint from {cfg.init_from}")
@@ -85,7 +78,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     if cfg.torch_compile:
-        model = cast(SegFormer, torch.compile(model, dynamic=True))
+        model = cast(SegFormer, torch.compile(model, fullgraph=True))
 
     optimizer = model.configure_optimizer(cfg.optimizer, device)
     n_epochs = cfg.n_epochs
@@ -98,7 +91,7 @@ def main(cfg: DictConfig) -> None:
             del kwargs["type"]
             lr_scheduler = poly_with_linear_warmup_lr_scheduler(
                 optimizer,
-                total_steps=n_epochs * math.ceil(len(train_dataloader) / grad_accum_steps),
+                total_steps=n_epochs * math.ceil(len(train_loader) / grad_accum_steps),
                 **kwargs,
             )
         else:
@@ -139,10 +132,10 @@ def main(cfg: DictConfig) -> None:
     @timer
     def train_epoch() -> dict:
         model.train()
-        progress_bar = tqdm(train_dataloader, desc="Training", dynamic_ncols=True, leave=False)
+        progress_bar = tqdm(train_loader, desc="Train", dynamic_ncols=True, leave=False)
         metrics = SegmentationMetrics(
             num_classes=num_classes,
-            ignore_index=ignore_index,
+            ignore_index=ignore_idx,
             device=device,
         )
 
@@ -183,10 +176,10 @@ def main(cfg: DictConfig) -> None:
     @torch.no_grad()
     def val_epoch() -> dict:
         model.eval()
-        progress_bar = tqdm(val_dataloader, desc="Validation", dynamic_ncols=True, leave=False)
+        progress_bar = tqdm(val_loader, desc="Val", dynamic_ncols=True, leave=False)
         metrics = SegmentationMetrics(
             num_classes=num_classes,
-            ignore_index=ignore_index,
+            ignore_index=ignore_idx,
             device=device,
         )
         for step, batch in enumerate(progress_bar):

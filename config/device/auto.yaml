@@ -5,7 +5,7 @@ torch_compile: false
 enable_tf32: false
 autocast_dtype: f32
 
-dataset:
+data:
   dataloader:
     batch_size: 2
     num_workers: 0

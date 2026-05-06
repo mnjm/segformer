@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 url="https://www.kaggle.com/api/v1/datasets/download/vijayabhaskar96/pascal-voc-2007-and-2012"
-outdir="./dataset/voc-datasets"
+outdir="./dataset/voc"
 tempzipfile="./pascal-voc-2007-and-2012.zip"
 
 # download

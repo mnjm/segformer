@@ -131,11 +131,11 @@ Evaluate on the training split instead:
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt --split train --compute_metrics
 ```
 
-Visualize samples containing selected classes:
+Visualize the best matching samples for selected classes:
 
 ```bash
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt \
-  --visualize person,dog \
+  --class-names person,dog \
   --top 8
 ```
 
@@ -143,17 +143,23 @@ Show the worst matching samples for a class:
 
 ```bash
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt \
-  --visualize bicycle \
+  --class-names bicycle \
   --bottom 8
+```
+
+Show the best samples across all classes:
+
+```bash
+uv run python eval.py ./logs/<run-name>/segformer-b0.pt --top 8
 ```
 
 Important evaluation flags:
 
 - `--compute_metrics`: overall and per-class metrics
 - `--split {train,val}`: dataset split, default `val`
-- `--visualize ...`: comma-separated class names or class ids
-- `--top N`: lowest-loss matching samples
-- `--bottom N`: highest-loss matching samples
+- `--class-names ...`: comma-separated class labels; empty means all classes
+- `--top N`: lowest-loss samples by loss on the selected classes
+- `--bottom N`: highest-loss samples by loss on the selected classes
 - `--no-compile`: ignore `torch_compile` from the saved config
 
 ## Model Variants

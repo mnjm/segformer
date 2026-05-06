@@ -1,14 +1,11 @@
 """Evaluate a trained SegFormer checkpoint on a dataset split."""
 
-from __future__ import annotations
-
 import argparse
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, cast
 
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 from bidict import bidict
 from omegaconf import DictConfig
@@ -25,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path, help="Path to a checkpoint saved by train.py.")
     parser.add_argument("-s", "--split", choices=("train", "val"), default="val")
+    parser.add_argument("-b", "--batch-size", type=int, default=4)
     parser.add_argument(
         "-cm",
         "--compute_metrics",
@@ -32,83 +30,25 @@ def parse_args() -> argparse.Namespace:
         help="If set, computes overall and per-class metrics for all classes.",
     )
     parser.add_argument(
-        "-v",
-        "--visualize",
+        "--class-names",
         type=str,
         default="",
-        help="Comma-separated class names or class ids to visualize.",
+        help="Comma-separated class labels to rank. Empty means all classes.",
     )
     parser.add_argument(
         "-t",
         "--top",
         type=int,
         default=None,
-        help="Show the N lowest-loss matching samples.",
+        help="Show the N lowest-loss samples for the selected classes.",
     )
     parser.add_argument(
-        "-b",
         "--bottom",
         type=int,
         default=None,
-        help="Show the N highest-loss matching samples.",
-    )
-    parser.add_argument(
-        "--no-compile",
-        action="store_true",
-        help="Disable torch.compile even if the checkpoint config enabled it.",
+        help="Show the N highest-loss samples for the selected classes.",
     )
     return parser.parse_args()
-
-
-def resolve_class_names(class_map: bidict[int, str], num_classes: int) -> list[str]:
-    return [class_map[idx] for idx in range(num_classes)]
-
-
-def resolve_requested_classes(
-    requested: str,
-    class_map: bidict[int, str],
-    valid_class_ids: set[int],
-) -> set[int]:
-    if not requested.strip():
-        return set()
-
-    requested_items = [item.strip() for item in requested.split(",") if item.strip()]
-    resolved = set[int]()
-    for item in requested_items:
-        if item.isdigit():
-            class_id = int(item)
-            if class_id not in valid_class_ids:
-                raise ValueError(f"Class id {class_id} is not valid for this dataset")
-            resolved.add(class_id)
-            continue
-
-        if item not in class_map.inv:
-            valid_names = ", ".join(class_map[idx] for idx in sorted(valid_class_ids))
-            raise ValueError(f"Unknown class name {item!r}. Valid classes: {valid_names}")
-        class_id = class_map.inv[item]
-        if class_id not in valid_class_ids:
-            raise ValueError(f"Class name {item!r} resolves to ignored class id {class_id}")
-        resolved.add(class_id)
-    return resolved
-
-
-def sample_path_for_index(dataset: Any, sample_idx: int) -> str:
-    if hasattr(dataset, "samples"):
-        return str(dataset.samples[sample_idx][0])
-    if hasattr(dataset, "datasets") and hasattr(dataset, "cumulative_sizes"):
-        subdataset_idx = int(np.searchsorted(dataset.cumulative_sizes, sample_idx, side="right"))
-        prev_size = 0 if subdataset_idx == 0 else dataset.cumulative_sizes[subdataset_idx - 1]
-        return sample_path_for_index(dataset.datasets[subdataset_idx], sample_idx - prev_size)
-    return f"sample_{sample_idx}"
-
-
-def build_eval_dataloader(cfg: DictConfig, split: str) -> DataLoader[Any]:
-    dataset = init_dataset(cfg, split=split, apply_augmentations=False)
-    dataloader_kwargs = dict(cfg.dataloader)
-    dataloader_kwargs["shuffle"] = False
-    dataloader_kwargs["drop_last"] = False
-    dataloader_kwargs["num_workers"] = 0
-    return DataLoader(dataset, **dataloader_kwargs)
 
 
 def build_metric_tables(
@@ -117,6 +57,17 @@ def build_metric_tables(
     total_samples: int,
     class_names: list[str],
 ) -> tuple[list[list[Any]], list[list[Any]]]:
+    """Build summary and per-class metric tables.
+
+    Args:
+        confmat: Confusion matrix over the evaluated split.
+        total_loss: Sum of batch losses weighted by batch size.
+        total_samples: Number of evaluated samples.
+        class_names: Class labels ordered by class id.
+
+    Returns:
+        Summary metric rows and per-class metric rows.
+    """
     intersection = torch.diag(confmat)
     predicted = confmat.sum(dim=0)
     target = confmat.sum(dim=1)
@@ -126,12 +77,12 @@ def build_metric_tables(
     )
 
     iou = intersection / union.clamp(min=1)
-    dice = (2 * intersection) / (predicted + target).clamp(min=1)
     precision = intersection / predicted.clamp(min=1)
     recall = intersection / target.clamp(min=1)
     specificity = true_negative / (true_negative + predicted - intersection).clamp(min=1)
     class_acc = recall
     f1 = (2 * precision * recall) / (precision + recall).clamp(min=1e-12)
+    avg_px_area = target / max(total_samples, 1)
 
     valid = union > 0
     valid_target = target > 0
@@ -139,7 +90,6 @@ def build_metric_tables(
     mean_loss = total_loss / max(total_samples, 1)
     pix_acc = intersection.sum() / confmat.sum().clamp(min=1)
     miou = iou[valid].mean() if valid.any() else torch.tensor(0.0, device=confmat.device)
-    mean_dice = dice[valid].mean() if valid.any() else torch.tensor(0.0, device=confmat.device)
     mean_precision = (
         precision[valid_target].mean()
         if valid_target.any()
@@ -174,7 +124,6 @@ def build_metric_tables(
         ["mean_acc", mean_class_acc.item()],
         ["miou", miou.item()],
         ["fw_iou", fw_iou.item()],
-        ["dice", mean_dice.item()],
         ["f1", mean_f1.item()],
         ["precision", mean_precision.item()],
         ["recall", mean_recall.item()],
@@ -189,8 +138,9 @@ def build_metric_tables(
                 class_name,
                 int(target[class_id].item()),
                 int(predicted[class_id].item()),
+                avg_px_area[class_id].item(),
+                class_acc[class_id].item(),
                 iou[class_id].item(),
-                dice[class_id].item(),
                 precision[class_id].item(),
                 recall[class_id].item(),
                 specificity[class_id].item(),
@@ -201,58 +151,65 @@ def build_metric_tables(
 
 
 def visualize_ranked_samples(
-    ranked_samples: list[dict[str, Any]],
+    ranked_sample: dict[str, Any],
     palette_map: dict[int, torch.Tensor],
     class_map: bidict[int, str],
-    title: str,
-) -> None:
-    n = len(ranked_samples)
-    if n == 0:
-        return
+    output_path: Path,
+    ranking_name: str,
+    sample_rank: int,
+) -> Path:
+    """Save one ranked sample figure.
 
-    fig, axes = plt.subplots(n, 3, figsize=(12, 4 * n))
-    axes = np.atleast_2d(axes)
-    for row_idx, sample in enumerate(ranked_samples):
-        image = sample["image"].permute(1, 2, 0).numpy()
-        image = (image - image.min()) / (image.max() - image.min() + 1e-8)
-        mask = decode_mask(sample["mask"].to(torch.uint8), palette_map).numpy() / 255.0
-        pred = decode_mask(sample["pred"].to(torch.uint8), palette_map).numpy() / 255.0
+    Args:
+        ranked_sample: Ranked sample payload to display.
+        palette_map: Mapping from class id to RGB color tensor.
+        class_map: Mapping from class id to class label.
+        output_path: Destination image path.
+        ranking_name: Human-readable ranking label.
+        sample_rank: One-based sample rank within the saved ordering.
 
-        matched_names = ", ".join(class_map[class_id] for class_id in sample["matched_classes"])
-        sample_title = (
-            f"loss={sample['loss']:.4f}\n"
-            f"{Path(sample['sample_path']).name}\n"
-            f"classes={matched_names}"
-        )
+    Returns:
+        Path to the saved image.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(10, 4), squeeze=False)
+    matched_names = ", ".join(class_map[class_id] for class_id in ranked_sample["matched_classes"])
+    image_i = ranked_sample["image"].permute(1, 2, 0).numpy()
+    image_i = (image_i - image_i.min()) / (image_i.max() - image_i.min() + 1e-8)
+    mask_i = decode_mask(ranked_sample["mask"].to(torch.uint8), palette_map).numpy() / 255.0
+    pred_i = decode_mask(ranked_sample["pred"].to(torch.uint8), palette_map).numpy() / 255.0
+    overlay_gt = image_i * 0.3 + mask_i * 0.7
+    overlay_pred = image_i * 0.3 + pred_i * 0.7
 
-        axes[row_idx, 0].imshow(image)
-        axes[row_idx, 0].set_title(sample_title)
-        axes[row_idx, 0].axis("off")
+    axes[0, 0].imshow(image_i)
+    axes[0, 0].set_title(f"classes={matched_names}\nloss={ranked_sample['loss']:.4f}")
+    axes[0, 0].axis("off")
+    axes[0, 1].imshow(overlay_gt)
+    axes[0, 1].set_title("ground truth")
+    axes[0, 1].axis("off")
+    axes[0, 2].imshow(overlay_pred)
+    axes[0, 2].set_title("prediction")
+    axes[0, 2].axis("off")
 
-        axes[row_idx, 1].imshow(image * 0.3 + mask * 0.7)
-        axes[row_idx, 1].set_title("ground truth")
-        axes[row_idx, 1].axis("off")
-
-        axes[row_idx, 2].imshow(image * 0.3 + pred * 0.7)
-        axes[row_idx, 2].set_title("prediction")
-        axes[row_idx, 2].axis("off")
-
-    fig.suptitle(title)
+    fig.suptitle(f"{ranking_name} Sample {sample_rank}")
     fig.tight_layout()
-    plt.show()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def build_ranking_stem(class_labels: list[str], ranking_kind: str, k: int) -> str:
+    """Build the output filename stem for ranked visualizations."""
+    safe_labels = ["".join(ch if ch.isalnum() else "_" for ch in label) for label in class_labels]
+    class_part = "_".join(safe_labels) if safe_labels else "all"
+    return f"{class_part}_{ranking_kind}_{k}"
 
 
 @torch.no_grad()
 def main() -> None:
     args = parse_args()
-    if args.top is not None and args.bottom is not None:
-        raise ValueError("Only one of --top or --bottom can be provided")
-    if not args.compute_metrics and not args.visualize.strip():
-        raise ValueError("Provide at least one of --compute_metrics or --visualize")
-    if args.visualize.strip() and args.top is None and args.bottom is None:
-        raise ValueError("Visualization requires either --top N or --bottom N")
-    if not args.visualize.strip() and (args.top is not None or args.bottom is not None):
-        raise ValueError("--top/--bottom require --visualize")
+    if not args.compute_metrics and args.top is None and args.bottom is None:
+        raise ValueError("Provide --compute_metrics, --top N, or --bottom N")
+    should_rank = args.top is not None or args.bottom is not None
 
     ckpt_raw = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     ckpt = cast(dict[str, Any], ckpt_raw)
@@ -260,29 +217,41 @@ def main() -> None:
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch_get_device("auto")
 
-    dataloader = build_eval_dataloader(cfg.dataset, split=args.split)
+    dataset = init_dataset(cfg, split=args.split, apply_augmentations=False)
+    dataloader_kwargs = dict(cfg.data.dataloader)
+    dataloader_kwargs["shuffle"] = False
+    dataloader_kwargs["drop_last"] = False
+    dataloader_kwargs["num_workers"] = 0
+    dataloader_kwargs["pin_memory"] = False
+    dataloader = DataLoader(dataset, **dataloader_kwargs)
     dataset = dataloader.dataset
     class_map = cast(bidict[int, str], getattr(dataset, "class_map"))
     palette_map = cast(dict[int, torch.Tensor], getattr(dataset, "palette_map"))
-    ignore_index = class_map.inv.get("ignore", None)
-    num_classes = len(class_map) - (1 if ignore_index is not None else 0)
-    class_names = resolve_class_names(class_map, num_classes)
+    ignore_index = getattr(cfg.dataset, "ignore_idx", None)
+    num_classes = len(class_map)
+    class_names = [class_map[idx] for idx in range(num_classes)]
     valid_class_ids = set(range(num_classes))
-    requested_classes = resolve_requested_classes(args.visualize, class_map, valid_class_ids)
+    requested_classes: set[int] = set()
+    requested_labels: list[str] = []
+    if should_rank:
+        requested_labels = [item.strip() for item in args.class_names.split(",") if item.strip()]
+        if requested_labels:
+            invalid_labels = [label for label in requested_labels if label not in class_map.inv]
+            if invalid_labels:
+                valid_names = ", ".join(class_names)
+                invalid_names = ", ".join(repr(label) for label in invalid_labels)
+                raise ValueError(
+                    f"Unknown class name(s) {invalid_names}. Valid classes: {valid_names}"
+                )
+            requested_classes = {class_map.inv[label] for label in requested_labels}
+        else:
+            requested_classes = set(valid_class_ids)
 
-    loss_fn = (
-        torch.nn.CrossEntropyLoss(ignore_index=ignore_index)
-        if ignore_index is not None
-        else torch.nn.CrossEntropyLoss()
-    )
     model_cfg = SegFormerConfig(**cfg.model)
-    model = SegFormer(model_cfg, loss_fn=loss_fn)
+    model = SegFormer(model_cfg, ignore_idx=ignore_index)
     model.load_state_dict(torch_compile_ckpt_fix(ckpt["model"]))
     model.to(device)
     model.eval()
-
-    if bool(getattr(cfg, "torch_compile", False)) and not args.no_compile:
-        model = cast(SegFormer, torch.compile(model, dynamic=True))
 
     torch_autocast_dtype = {"f32": torch.float32, "bf16": torch.bfloat16}[cfg.autocast_dtype]
     autocast_ctx = (
@@ -343,26 +312,35 @@ def main() -> None:
             num_classes, num_classes
         )
 
-        if requested_classes:
+        if should_rank:
             pixel_losses = per_sample_loss_fn(logits, masks)
             for batch_idx, sample_idx in enumerate(sample_indices):
                 sample_mask = masks[batch_idx]
-                present_classes = set(torch.unique(sample_mask).tolist())
-                matched_classes = sorted(
-                    valid_class_ids.intersection(requested_classes, present_classes)
-                )
+                present_classes = {
+                    int(class_id)
+                    for class_id in torch.unique(sample_mask).tolist()
+                    if class_id >= 0
+                }
+                matched_classes = sorted(requested_classes.intersection(present_classes))
                 if not matched_classes:
                     continue
 
-                valid_pixels = torch.ones_like(sample_mask, dtype=torch.bool)
+                valid_pixels = torch.isin(
+                    sample_mask,
+                    torch.tensor(
+                        matched_classes, device=sample_mask.device, dtype=sample_mask.dtype
+                    ),
+                )
                 if ignore_index is not None:
-                    valid_pixels = sample_mask != ignore_index
+                    valid_pixels &= sample_mask != ignore_index
+                if not valid_pixels.any():
+                    continue
+
                 sample_loss = pixel_losses[batch_idx][valid_pixels].mean().item()
                 ranked_samples.append(
                     {
                         "loss": sample_loss,
                         "sample_idx": sample_idx,
-                        "sample_path": sample_path_for_index(dataset, sample_idx),
                         "matched_classes": matched_classes,
                         "image": images[batch_idx].cpu(),
                         "mask": masks[batch_idx].cpu(),
@@ -387,8 +365,9 @@ def main() -> None:
                     "class",
                     "target_px",
                     "pred_px",
+                    "avg_px_area",
+                    "pix_acc",
                     "iou",
-                    "dice",
                     "precision",
                     "recall",
                     "specificity",
@@ -404,33 +383,34 @@ def main() -> None:
             print("\nNo matching samples were found for the requested classes.")
             return
 
-        reverse = args.bottom is not None
-        k = args.bottom if args.bottom is not None else args.top
-        assert k is not None
-        ranked_samples.sort(key=lambda item: item["loss"], reverse=reverse)
-        chosen = ranked_samples[:k]
+        output_dir = Path("eval_outputs")
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        print("\nRanked Samples")
-        print(
-            tabulate(
-                [
-                    [
-                        item["sample_idx"],
-                        Path(item["sample_path"]).name,
-                        ", ".join(class_map[class_id] for class_id in item["matched_classes"]),
-                        item["loss"],
-                    ]
-                    for item in chosen
-                ],
-                headers=["index", "sample", "matched_classes", "loss"],
-                tablefmt="github",
-                floatfmt=".6f",
+        ranking_jobs: list[tuple[str, int, bool, str]] = []
+        if args.top is not None:
+            ranking_jobs.append(("top", args.top, False, "Top"))
+        if args.bottom is not None:
+            ranking_jobs.append(("bottom", args.bottom, True, "Bottom"))
+
+        for ranking_kind, k, reverse, ranking_name in ranking_jobs:
+            ranked_samples.sort(key=lambda item: item["loss"], reverse=reverse)
+            chosen = ranked_samples[:k]
+            output_stem = build_ranking_stem(requested_labels, ranking_kind, k)
+            ranking_dir = output_dir / output_stem
+            ranking_dir.mkdir(parents=True, exist_ok=True)
+            for sample_rank, ranked_sample in enumerate(chosen, start=1):
+                output_path = ranking_dir / f"{sample_rank}.png"
+                visualize_ranked_samples(
+                    ranked_sample=ranked_sample,
+                    palette_map=palette_map,
+                    class_map=class_map,
+                    output_path=output_path,
+                    ranking_name=ranking_name,
+                    sample_rank=sample_rank,
+                )
+            print(
+                f"\nSaved {len(chosen)} {ranking_name.lower()} ranked visualizations to {ranking_dir}"
             )
-        )
-        ranking_name = "Top" if args.top is not None else "Bottom"
-        visualize_ranked_samples(
-            chosen, palette_map, class_map, f"{ranking_name} {len(chosen)} Samples"
-        )
 
 
 if __name__ == "__main__":
