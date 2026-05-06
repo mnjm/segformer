@@ -12,15 +12,15 @@ from bidict import bidict
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from PIL import Image
-from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset
 from torchvision import tv_tensors
 from torchvision.io import read_image
 
 from utils import to_2tuple
 
 logger = logging.getLogger(__name__)
-supported_dataset = ["voc_2007_2012"]
-voc_path = Path("./dataset/voc-datasets")
+supported_dataset = ["voc"]
+common_path = Path("./dataset/")
 
 
 def init_dataset(
@@ -31,33 +31,24 @@ def init_dataset(
     """Build one dataset split and attach dataset metadata.
 
     Args:
-        cfg: Dataset configuration.
+        cfg: Full training configuration.
         split: Dataset split name.
         apply_augmentations: Whether to enable training augmentations.
 
     Returns:
         Dataset[Any]: Configured dataset instance for the requested split.
     """
-    dataset_name = cfg.name
+    dataset_name = cfg.dataset.name
     assert dataset_name in supported_dataset, f"Dataset {dataset_name} is not supported"
     assert split in ["train", "val"]
-    transforms = build_transforms(cfg, apply_augmentations)
-    if dataset_name == "voc_2007_2012":
-        if split == "train":
-            dataset_l = [
-                VOCSemanticSegmentationDataset(
-                    voc_path / sub_name, split="trainval", transforms=transforms
-                )
-                for sub_name in ["VOC2007", "VOC2012"]
-            ]
-            dataset = ConcatDataset(dataset_l)
-        else:
-            dataset = VOCSemanticSegmentationDataset(
-                voc_path / "VOC2007", split="test", transforms=transforms
-            )
+    transforms = build_transforms(cfg.data, apply_augmentations)
+    if dataset_name == "voc":
+        dataset = VOCSemanticSegmentationDataset(
+            common_path / "voc", split=split, transforms=transforms
+        )
     else:
         raise NotImplementedError(f"Dataset {dataset_name} is not supported")
-    class_map = init_class_map(dataset_name)
+    class_map = bidict({idx: name for idx, name in enumerate(cfg.dataset.classes)})
     palette_map = init_palette_map(dataset_name, class_map)
     setattr(dataset, "class_map", class_map)
     setattr(dataset, "palette_map", palette_map)
@@ -68,7 +59,7 @@ def init_dataloader(cfg: DictConfig, split: str) -> DataLoader[Any]:
     """Build one dataloader for the requested dataset split.
 
     Args:
-        cfg: Dataset configuration.
+        cfg: Full training configuration.
         split: Dataset split name.
 
     Returns:
@@ -76,18 +67,18 @@ def init_dataloader(cfg: DictConfig, split: str) -> DataLoader[Any]:
     """
     assert split in ["train", "val"], f"Split {split} is not supported"
     dataset = init_dataset(cfg, split, apply_augmentations=(split == "train"))
-    dataloader_kwargs = dict(cfg.dataloader)
+    dataloader_kwargs = dict(cfg.data.dataloader)
     dataloader_kwargs["drop_last"] = split == "train" and dataloader_kwargs.get("drop_last", False)
     dataloader_kwargs["shuffle"] = split == "train"
     dataloader = DataLoader(dataset, **dataloader_kwargs)
     return dataloader
 
 
-def build_transforms(cfg: DictConfig, apply_augmentations: bool = False) -> T.Compose:
+def build_transforms(data_cfg: DictConfig, apply_augmentations: bool = False) -> T.Compose:
     """Create the image and mask transform pipeline.
 
     Args:
-        cfg: Dataset configuration.
+        data_cfg: Data preprocessing and augmentation configuration.
         apply_augmentations: Whether to include augmentation transforms.
 
     Returns:
@@ -96,17 +87,17 @@ def build_transforms(cfg: DictConfig, apply_augmentations: bool = False) -> T.Co
     transforms: list[Any] = []
     resized_b = False
     if apply_augmentations:
-        for aug in cfg.augmentations:
+        for aug in data_cfg.augmentations:
             if (
                 aug.get("_target_") == "torchvision.transforms.v2.RandomResizedCrop"
-                and aug.get("size") == cfg.input_size
+                and aug.get("size") == data_cfg.input_size
             ):
                 resized_b = True
             transforms.append(instantiate(aug, _convert_="all"))
     if not resized_b:
-        transforms.append(T.Resize(to_2tuple(cfg.input_size)))
-    mean = cfg.input_normalization.mean
-    std = cfg.input_normalization.std
+        transforms.append(T.Resize(to_2tuple(data_cfg.input_size)))
+    mean = data_cfg.input_normalization.mean
+    std = data_cfg.input_normalization.std
     transforms.extend(
         [
             T.ToDtype(torch.float32, scale=True),
@@ -132,20 +123,21 @@ class VOCSemanticSegmentationDataset(Dataset):
         self.transforms = transforms
         self.samples: list[tuple[Path, Path]] = []
 
-        img_id_file = dataset_path / "ImageSets" / "Segmentation" / f"{split}.txt"
-        with open(img_id_file, "r") as f:
-            img_ids = [line.strip() for line in f.readlines()]
-
-        for img_id in img_ids:
-            img_path = dataset_path / "JPEGImages" / f"{img_id}.jpg"
-            mask_path = dataset_path / "SegmentationClass" / f"{img_id}.png"
-            if not img_path.is_file():
-                logger.warning(f"Missing image for {img_id}")
-                continue
-            if not mask_path.is_file():
-                logger.warning(f"Missing mask for {img_id}")
-                continue
-            self.samples.append((img_path, mask_path))
+        for subset in ["VOC2007", "VOC2012"]:
+            subset_path = dataset_path / subset
+            img_id_file = subset_path / "ImageSets" / "Segmentation" / f"{split}.txt"
+            with open(img_id_file, "r") as f:
+                img_ids = [line.strip() for line in f.readlines()]
+            for img_id in img_ids:
+                img_path = subset_path / "JPEGImages" / f"{img_id}.jpg"
+                mask_path = subset_path / "SegmentationClass" / f"{img_id}.png"
+                if not img_path.is_file():
+                    logger.warning(f"Missing image for {img_id}")
+                    continue
+                if not mask_path.is_file():
+                    logger.warning(f"Missing mask for {img_id}")
+                    continue
+                self.samples.append((img_path, mask_path))
 
     def __len__(self) -> int:
         """Return the number of valid image and mask pairs.
@@ -176,46 +168,6 @@ class VOCSemanticSegmentationDataset(Dataset):
         return img, mask.long()
 
 
-def init_class_map(dataset_name: str) -> bidict[int, str]:
-    """Build the class-id to class-name mapping for one dataset.
-
-    Args:
-        dataset_name: Supported dataset name.
-
-    Returns:
-        bidict[int, str]: Bi-directional mapping of class IDs and class names.
-    """
-    assert dataset_name in supported_dataset
-    if dataset_name == "voc_2007_2012":
-        voc_classes = [
-            "background",
-            "aeroplane",
-            "bicycle",
-            "bird",
-            "boat",
-            "bottle",
-            "bus",
-            "car",
-            "cat",
-            "chair",
-            "cow",
-            "diningtable",
-            "dog",
-            "horse",
-            "motorbike",
-            "person",
-            "pottedplant",
-            "sheep",
-            "sofa",
-            "train",
-            "tvmonitor",
-        ]
-        class_map = bidict({i: cls for i, cls in enumerate(voc_classes)})
-        class_map[255] = "ignore"
-        return class_map
-    return bidict()
-
-
 def init_palette_map(
     dataset_name: str,
     class_map: bidict[int, str],
@@ -230,7 +182,7 @@ def init_palette_map(
         dict[int, torch.Tensor]: Mapping from class ID to RGB color tensor.
     """
     assert dataset_name in supported_dataset
-    sample_mask_path = next((voc_path / "VOC2012" / "SegmentationClass").glob("*.png"))
+    sample_mask_path = next((common_path / "voc" / "VOC2012" / "SegmentationClass").glob("*.png"))
     sample_mask = Image.open(sample_mask_path)
     assert sample_mask.mode == "P", f"{sample_mask_path} is not a palette image"
     palette = sample_mask.getpalette()
@@ -239,7 +191,7 @@ def init_palette_map(
         [palette[i : i + 3] for i in range(0, len(palette), 3)],
         dtype=torch.uint8,
     )
-    return {class_id: palette[class_id] for class_id in class_map if class_id != 255}
+    return {class_id: palette[class_id] for class_id in class_map}
 
 
 def decode_mask(mask: torch.Tensor, palette: dict[int, torch.Tensor]) -> torch.Tensor:
@@ -256,6 +208,8 @@ def plot_samples(
     palette: dict[int, torch.Tensor],
     predictions: torch.Tensor | None = None,
     overlay_r: float = 0.3,
+    sample_titles: list[str] | None = None,
+    figure_title: str | None = None,
 ) -> None:
     """Visualize images with ground-truth and optional predicted masks.
 
@@ -265,6 +219,8 @@ def plot_samples(
         palette: Mapping from class ID to RGB color tensor.
         predictions: Optional predicted masks shaped ``[batch, height, width]``.
         overlay_r: Image blending ratio used for overlays.
+        sample_titles: Optional per-sample titles for the image column.
+        figure_title: Optional figure title.
 
     Returns:
         None: Displays the visualization and closes the figure.
@@ -274,6 +230,9 @@ def plot_samples(
     assert predictions is None or predictions.ndim == 3 and predictions.size(0) == images.size(0), (
         "predictions must be B x H x W"
     )
+    assert sample_titles is None or len(sample_titles) == images.size(0), (
+        "sample_titles must match the batch size"
+    )
     n = images.size(0)
     fig, axes = plt.subplots(n, 2 if predictions is None else 3, figsize=(10, 10))
     axes = np.atleast_2d(axes)
@@ -281,16 +240,22 @@ def plot_samples(
         image_i = images[i].permute(1, 2, 0).numpy()
         image_i = (image_i - image_i.min()) / (image_i.max() - image_i.min() + 1e-8)
         axes[i, 0].imshow(image_i)
+        if sample_titles is not None:
+            axes[i, 0].set_title(sample_titles[i])
         axes[i, 0].axis("off")
         mask_i = decode_mask(masks[i].to(torch.uint8), palette).numpy() / 255.0
         overlay_i = image_i * overlay_r + mask_i * (1 - overlay_r)
         axes[i, 1].imshow(overlay_i)
+        axes[i, 1].set_title("ground truth")
         axes[i, 1].axis("off")
         if predictions is not None:
             pred_i = predictions[i]
             pred_i = decode_mask(pred_i.to(torch.uint8), palette).numpy() / 255.0
             overlay_pred_i = image_i * overlay_r + pred_i * (1 - overlay_r)
             axes[i, 2].imshow(overlay_pred_i)
+            axes[i, 2].set_title("prediction")
             axes[i, 2].axis("off")
+    if figure_title is not None:
+        fig.suptitle(figure_title)
     fig.tight_layout()
     plt.show()

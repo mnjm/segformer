@@ -7,7 +7,6 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from numpy._core.numeric import full
 from omegaconf import DictConfig
 
 from .decoder import SegFormerDecoder
@@ -61,7 +60,7 @@ class SegFormerConfig:
 class SegFormer(nn.Module):
     """Build a SegFormer model from a transformer encoder and segmentation decoder."""
 
-    def __init__(self, cfg: SegFormerConfig, loss_fn: nn.Module | None = None) -> None:
+    def __init__(self, cfg: SegFormerConfig, ignore_idx: int | None = None) -> None:
         """Initialize the SegFormer model components.
 
         Args:
@@ -73,7 +72,10 @@ class SegFormer(nn.Module):
         """
         super().__init__()
         self.cfg = cfg
-        self.loss_fn = loss_fn
+        if ignore_idx is not None:
+            self.loss_fn = nn.CrossEntropyLoss(ignore_index=ignore_idx)
+        else:
+            self.loss_fn = nn.CrossEntropyLoss()
 
         self.encoder = MixTransformer(
             img_size=cfg.img_size,

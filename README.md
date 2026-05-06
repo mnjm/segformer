@@ -1,30 +1,23 @@
 # SegFormer
 
-PyTorch implementation of SegFormer for semantic segmentation, with Pascal VOC training/evaluation, Hydra-based configuration, and parity tests against Hugging Face checkpoints.
+A minimal implementation of [SegFormer](https://arxiv.org/pdf/2105.15203). Validated on VOC 2007 and 2012 datasets.
 
-## What is in this repo
+## Structure
 
-- Local implementation of the SegFormer encoder/decoder stack in [`model/`](./model)
-- Pretrained encoder initialization from Hugging Face SegFormer checkpoints
-- Pascal VOC 2007 + 2012 data pipeline in [`data.py`](./data.py)
+- SegFormer implementation in [`model/`](./model)
+- Pascal VOC semantic segmentation data pipeline in [`data.py`](./data.py)
 - Training entrypoint in [`train.py`](./train.py)
-- Evaluation and visualization entrypoint in [`eval.py`](./eval.py)
-- Variant configs for `segformer-b0` through `segformer-b5` in [`config/model/`](./config/model)
-- Parity test to verify this implementation matches Hugging Face logits in [`tests/test_parity_hf.py`](./tests/test_parity_hf.py)
-
-## Requirements
-
-- Python 3.12+
-- `uv` for environment management
-- `curl` and `unzip` for dataset download
-- CUDA is the default training target in [`config/default.yaml`](./config/default.yaml)
-
-The project pins PyTorch through `uv`:
-
-- Linux: CUDA 12.9 wheels
-- Non-Linux: CPU wheels
+- Evaluation and visualization in [`eval.py`](./eval.py)
+- Model configs for `segformer-b0` through `segformer-b5` in [`config/model/`](./config/model)
+- A parity test in [`tests/test_parity_hf.py`](./tests/test_parity_hf.py)
 
 ## Setup
+
+Requirements:
+
+- Python 3.12+
+- `uv`
+- `curl` and `unzip` for the dataset helper script
 
 Install dependencies:
 
@@ -32,73 +25,39 @@ Install dependencies:
 uv sync
 ```
 
-If you want to enable Weights & Biases logging, create a `.env` file with:
-
-```bash
-WANDB_API_KEY=...
-```
-
-W&B logging is off by default. Enable it with a Hydra override:
-
-```bash
-uv run python train.py logging.wandb.enable=true
-```
 
 ## Dataset
 
-This repo expects Pascal VOC under `./dataset/voc-datasets` and ships a helper script:
+The code expects Pascal VOC under `./dataset/voc`. The helper script will download and unpack it:
 
 ```bash
-chmod +x download-voc-dataset.sh
 ./download-voc-dataset.sh
 ```
 
-Expected layout after extraction:
+Expected layout:
 
 ```text
 dataset/
-  voc-datasets/
+  voc/
     VOC2007/
     VOC2012/
 ```
 
-Training uses:
-
-- `VOC2007/trainval`
-- `VOC2012/trainval`
-
-Validation uses:
-
-- `VOC2007/test`
-
-The default dataset config is:
-
-- Dataset name: `voc_2007_2012`
-- Input size: `512`
-- Classes: `21` foreground/background classes, with VOC ignore label `255`
+Training uses `VOC2007/trainval` and `VOC2012/trainval`. Validation uses `VOC2007/test`.
 
 ## Training
 
-Run training with the default config:
+Run the default config:
 
 ```bash
 uv run python train.py
 ```
 
-Default behavior:
+Defaults are `segformer-b0`, `cuda`, `300` epochs, `bf16`, gradient accumulation `4`. Outputs go under `logs/<run-name>/`.
 
-- Model: `segformer-b0`
-- Device: `cuda`
-- Epochs: `300`
-- Mixed precision dtype: `bf16`
-- Gradient accumulation: `4`
-- Validation every `10` epochs
-- Checkpoint every `20` epochs
-- Hydra outputs under `./logs/<run-name>/`
+A fresh run initializes the encoder from the matching Hugging Face checkpoint.
 
-On a fresh run, `train.py` initializes the encoder from the matching Hugging Face checkpoint and trains the decoder plus encoder locally.
-
-Useful overrides:
+Common overrides:
 
 ```bash
 uv run python train.py model=segformer-b2
@@ -109,119 +68,75 @@ uv run python train.py init_from=/absolute/path/to/checkpoint.pt
 uv run python train.py torch_compile=true
 ```
 
-Notes:
+`device_type=cuda` requires CUDA. `device_type=auto` falls back to MPS, then XLA, then CPU. `init_from=...` resumes model, optimizer, scheduler, epoch, and W&B state (if enabled).
 
-- `device_type=cuda` asserts that CUDA is available.
-- `device_type=auto` is intended for non-CUDA environments and will prefer MPS, then XLA, then CPU.
-- Resuming from `init_from=...` restores model, optimizer, scheduler, epoch, and W&B run id.
+If you want Weights & Biases logging, add this to `.env`:
+
+```bash
+WANDB_API_KEY=...
+```
+
+Then enable it when training:
+
+```bash
+uv run python train.py logging.wandb.enable=true
+```
 
 ## Evaluation
 
-`eval.py` operates on checkpoints produced by `train.py`.
-
-Compute metrics on the validation split:
+Evaluate a checkpoint and compute metrics:
 
 ```bash
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt --compute_metrics
 ```
 
-Evaluate on the training split instead:
+Run on the training split instead:
 
 ```bash
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt --split train --compute_metrics
 ```
 
-Visualize samples containing selected classes:
+Show best examples for selected classes:
 
 ```bash
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt \
-  --visualize person,dog \
+  --class-names person,dog \
   --top 8
 ```
 
-Show the worst matching samples for a class:
+Show worst examples for a class:
 
 ```bash
 uv run python eval.py ./logs/<run-name>/segformer-b0.pt \
-  --visualize bicycle \
+  --class-names bicycle \
   --bottom 8
 ```
 
-Important evaluation flags:
+Useful flags:
 
-- `--compute_metrics`: overall and per-class metrics
-- `--split {train,val}`: dataset split, default `val`
-- `--visualize ...`: comma-separated class names or class ids
-- `--top N`: lowest-loss matching samples
-- `--bottom N`: highest-loss matching samples
-- `--no-compile`: ignore `torch_compile` from the saved config
-
-## Model Variants
-
-Available configs:
-
-- `segformer-b0`
-- `segformer-b1`
-- `segformer-b2`
-- `segformer-b3`
-- `segformer-b4`
-- `segformer-b5`
-
-Each variant is defined in [`config/model/`](./config/model) and can be selected with a Hydra override:
-
-```bash
-uv run python train.py model=segformer-b5
-```
+- `--compute_metrics`
+- `--split {train,val}`
+- `--class-names ...`
+- `--top N`
+- `--bottom N`
 
 ## Testing
 
-Run the parity test suite:
+Run the Hugging Face parity test:
 
 ```bash
 uv run pytest tests/test_parity_hf.py
 ```
 
-This test:
+It checks weight mapping, parameter counts, and output logits across the model variants. The first run may populate `./cache/`.
 
-- Loads each local `segformer-b*` config
-- Maps Hugging Face weights into the local implementation
-- Verifies parameter count parity
-- Verifies output logits match Hugging Face within tolerance
-
-The first run may download Hugging Face model weights into `./cache/`.
-
-## Project Structure
-
-```text
-.
-├── config/
-│   ├── default.yaml
-│   ├── device/
-│   └── model/
-├── model/
-│   ├── decoder.py
-│   ├── hf_mapper.py
-│   └── mix_transformer.py
-├── tests/
-│   └── test_parity_hf.py
-├── data.py
-├── eval.py
-├── train.py
-├── utils.py
-└── download-voc-dataset.sh
 ```
-
-## Output Artifacts
-
-Training runs are written to:
-
-- `logs/<hydra-job-name>/`
-
-Typical contents:
-
-- `<model-name>.pt`: checkpoint
-- `config/`: Hydra-resolved config snapshot
-
-Hugging Face downloads are cached in:
-
-- `cache/`
+@misc{xie2021segformer,
+    title   = {SegFormer: Simple and Efficient Design for Semantic Segmentation with Transformers},
+    author  = {Enze Xie and Wenhai Wang and Zhiding Yu and Anima Anandkumar and Jose M. Alvarez and Ping Luo},
+    year    = {2021},
+    eprint  = {2105.15203},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV}
+}
+```
