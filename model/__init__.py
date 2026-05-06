@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from numpy._core.numeric import full
 from omegaconf import DictConfig
 
 from .decoder import SegFormerDecoder
@@ -125,7 +126,6 @@ class SegFormer(nn.Module):
         Returns:
             None: Updates encoder parameters in place.
         """
-        logger.info(f"Loading pretrained encoder for {self.cfg.name}")
         hf_model = load_hf_model(self.cfg.name)
         incompatible = self.encoder.load_state_dict(
             build_encoder_state_dict(hf_model),
@@ -135,6 +135,7 @@ class SegFormer(nn.Module):
         unexpected_keys = incompatible.unexpected_keys
         assert len(missing_keys) == 0, f"Missing keys: {missing_keys}"
         assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
+        logger.info(f"Loaded pretrained encoder for {self.cfg.name}")
 
     def configure_optimizer(
         self,
@@ -202,7 +203,9 @@ class SegFormer(nn.Module):
 if __name__ == "__main__":
     model = SegFormer(SegFormerConfig())
     model.load_pretrained_encoder()
-    print(sum([x.numel() for x in model.parameters()]))
+    print(f"{sum([x.numel() for x in model.parameters()]) / 1e6:.2f}M parameters")
+    model = torch.compile(model, fullgraph=True)
+    print("Model Compiled")
     x = torch.randn(1, 3, 224, 224)
     output = model(x)
-    print(output.shape)
+    print(f"{output.shape=}")
