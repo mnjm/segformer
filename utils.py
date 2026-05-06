@@ -247,7 +247,12 @@ class SegmentationMetrics:
             targets = targets[mask]
 
         # valid class mask
-        mask = (targets >= 0) & (targets < self.num_classes)
+        mask = (
+            (targets >= 0)
+            & (targets < self.num_classes)
+            & (preds >= 0)
+            & (preds < self.num_classes)
+        )
         preds = preds[mask]
         targets = targets[mask]
 

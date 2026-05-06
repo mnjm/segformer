@@ -1,7 +1,7 @@
 name: segformer-b4
 img_size: 512
 in_chals: 3
-num_classes: 150
+num_classes: ${dataset.num_classes}
 embed_dims: [64, 128, 320, 512]
 num_heads: [1, 2, 5, 8]
 mlp_ratios: [4, 4, 4, 4]

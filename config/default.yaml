@@ -17,9 +17,10 @@ show_batch_initially: true
 dataset:
     name: voc_2007_2012
     input_size: 512
+    num_classes: 21 # 20 VoC classes + 1 background
     dataloader:
         batch_size: 8
-        num_workers: 0
+        num_workers: 4
         pin_memory: true
         drop_last: true
     augmentations:

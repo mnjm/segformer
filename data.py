@@ -155,7 +155,7 @@ class VOCSemanticSegmentationDataset(Dataset):
         """
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[tv_tensors.Image, tv_tensors.Mask]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Load one image and segmentation mask pair.
 
         Args:
@@ -173,7 +173,7 @@ class VOCSemanticSegmentationDataset(Dataset):
         mask = tv_tensors.Mask(torch.from_numpy(mask_np))
         if self.transforms is not None:
             img, mask = self.transforms(img, mask)
-        return img, mask
+        return img, mask.long()
 
 
 def init_class_map(dataset_name: str) -> bidict[int, str]:
