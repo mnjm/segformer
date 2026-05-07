@@ -204,6 +204,49 @@ def build_ranking_stem(class_labels: list[str], ranking_kind: str, k: int) -> st
     return f"{class_part}_{ranking_kind}_{k}"
 
 
+def plot_per_class_iou(class_rows: list[list[Any]], miou: float, output_path: Path) -> Path:
+    """Save a paper-friendly horizontal bar chart of per-class IoU.
+
+    Args:
+        class_rows: Per-class metric table rows from ``build_metric_tables``.
+        miou: Mean intersection over union for the evaluated split.
+        output_path: Destination image path.
+
+    Returns:
+        Path to the saved plot.
+    """
+    class_names = [str(row[1]) for row in class_rows]
+    ious = [float(row[6]) for row in class_rows]
+
+    plt.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.titlesize": 12,
+            "axes.labelsize": 11,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+        }
+    )
+    fig_height = max(4.8, 0.23 * len(class_names))
+    fig, ax = plt.subplots(figsize=(6.8, fig_height))
+    ax.barh(class_names, ious, height=0.38, color="#4C78A8", edgecolor="none")
+    ax.set_xlabel("IoU")
+    ax.set_title(f"mIoU {miou:.6f}", pad=10)
+    ax.set_xlim(0.0, 1.0)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#D9D9D9", linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#B0B0B0")
+    ax.spines["bottom"].set_color("#B0B0B0")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 @torch.no_grad()
 def main() -> None:
     args = parse_args()
@@ -377,6 +420,11 @@ def main() -> None:
                 floatfmt=".6f",
             )
         )
+        output_dir = Path("eval_outputs")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        miou = next(float(value) for metric, value in summary_rows if metric == "miou")
+        plot_path = plot_per_class_iou(class_rows, miou, output_dir / "iou_barplot.png")
+        print(f"\nSaved per-class IoU plot to {plot_path}")
 
     if args.top is not None or args.bottom is not None:
         if not ranked_samples:

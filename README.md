@@ -2,6 +2,10 @@
 
 A minimal implementation of [SegFormer](https://arxiv.org/pdf/2105.15203). Validated on VOC 2007 and 2012 datasets.
 
+![Arch](https://raw.githubusercontent.com/mnjm/segformer/refs/heads/assets/segformer.png)
+
+Evaluation results can be found [here](./eval_outputs)
+
 ## Structure
 
 - SegFormer implementation in [`model/`](./model)
@@ -24,7 +28,6 @@ Install dependencies:
 ```bash
 uv sync
 ```
-
 
 ## Dataset
 
@@ -128,7 +131,9 @@ Run the Hugging Face parity test:
 uv run pytest tests/test_parity_hf.py
 ```
 
-It checks weight mapping, parameter counts, and output logits across the model variants. The first run may populate `./cache/`.
+It checks weight mapping, parameter counts, and output logits across the model variants.
+
+## Citation
 
 ```
 @misc{xie2021segformer,
