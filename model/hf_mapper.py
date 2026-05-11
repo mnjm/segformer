@@ -33,6 +33,11 @@ def load_hf_model(
     )
 
 
+def linear_to_conv2d_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Expand a Linear weight matrix into a ``1x1`` convolution kernel."""
+    return weight.unsqueeze(-1).unsqueeze(-1)
+
+
 def build_encoder_state_dict(
     hf_model: SegformerForSemanticSegmentation,
 ) -> dict[str, torch.Tensor]:
@@ -79,18 +84,20 @@ def build_encoder_state_dict(
             local_state[f"{local_base}.norm2.weight"] = hf_state[f"{hf_base}.layer_norm_2.weight"]
             local_state[f"{local_base}.norm2.bias"] = hf_state[f"{hf_base}.layer_norm_2.bias"]
 
-            local_state[f"{local_base}.attn.q.weight"] = hf_state[
-                f"{hf_base}.attention.self.query.weight"
-            ]
+            local_state[f"{local_base}.attn.q.weight"] = linear_to_conv2d_weight(
+                hf_state[f"{hf_base}.attention.self.query.weight"]
+            )
             local_state[f"{local_base}.attn.q.bias"] = hf_state[
                 f"{hf_base}.attention.self.query.bias"
             ]
-            local_state[f"{local_base}.attn.kv.weight"] = torch.cat(
-                [
-                    hf_state[f"{hf_base}.attention.self.key.weight"],
-                    hf_state[f"{hf_base}.attention.self.value.weight"],
-                ],
-                dim=0,
+            local_state[f"{local_base}.attn.kv.weight"] = linear_to_conv2d_weight(
+                torch.cat(
+                    [
+                        hf_state[f"{hf_base}.attention.self.key.weight"],
+                        hf_state[f"{hf_base}.attention.self.value.weight"],
+                    ],
+                    dim=0,
+                )
             )
             local_state[f"{local_base}.attn.kv.bias"] = torch.cat(
                 [
@@ -99,9 +106,9 @@ def build_encoder_state_dict(
                 ],
                 dim=0,
             )
-            local_state[f"{local_base}.attn.proj.weight"] = hf_state[
-                f"{hf_base}.attention.output.dense.weight"
-            ]
+            local_state[f"{local_base}.attn.proj.weight"] = linear_to_conv2d_weight(
+                hf_state[f"{hf_base}.attention.output.dense.weight"]
+            )
             local_state[f"{local_base}.attn.proj.bias"] = hf_state[
                 f"{hf_base}.attention.output.dense.bias"
             ]
@@ -121,7 +128,9 @@ def build_encoder_state_dict(
                     f"{hf_base}.attention.self.layer_norm.bias"
                 ]
 
-            local_state[f"{local_base}.mlp.fc1.weight"] = hf_state[f"{hf_base}.mlp.dense1.weight"]
+            local_state[f"{local_base}.mlp.fc1.weight"] = linear_to_conv2d_weight(
+                hf_state[f"{hf_base}.mlp.dense1.weight"]
+            )
             local_state[f"{local_base}.mlp.fc1.bias"] = hf_state[f"{hf_base}.mlp.dense1.bias"]
             local_state[f"{local_base}.mlp.dwconv.dwconv.weight"] = hf_state[
                 f"{hf_base}.mlp.dwconv.dwconv.weight"
@@ -129,7 +138,9 @@ def build_encoder_state_dict(
             local_state[f"{local_base}.mlp.dwconv.dwconv.bias"] = hf_state[
                 f"{hf_base}.mlp.dwconv.dwconv.bias"
             ]
-            local_state[f"{local_base}.mlp.fc2.weight"] = hf_state[f"{hf_base}.mlp.dense2.weight"]
+            local_state[f"{local_base}.mlp.fc2.weight"] = linear_to_conv2d_weight(
+                hf_state[f"{hf_base}.mlp.dense2.weight"]
+            )
             local_state[f"{local_base}.mlp.fc2.bias"] = hf_state[f"{hf_base}.mlp.dense2.bias"]
 
     return local_state

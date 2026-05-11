@@ -10,3 +10,4 @@ wheels/
 cache/
 logs/
 wandb
+artifacts

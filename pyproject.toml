@@ -18,6 +18,8 @@ dependencies = [
     "torchvision>=0.25.0",
     "transformers>=5.7.0",
     "wandb>=0.26.1",
+    "ai-edge-litert>=2.1.3",
+    "litert-torch-nightly>=0.9.0.dev20260331",
 ]
 
 [tool.uv.sources]

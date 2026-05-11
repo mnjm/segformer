@@ -22,16 +22,19 @@ from model.hf_mapper import (  # noqa: E402
 CONFIG_DIR = ROOT_DIR / "config" / "model"
 
 
-def load_local_config(config_path: Path) -> SegFormerConfig:
+def load_local_config(config_path: Path, num_classes: int) -> SegFormerConfig:
     """Load one SegFormer YAML config file.
 
     Args:
         config_path: Path to the YAML config for one SegFormer variant.
+        num_classes: Number of labels expected by the HF checkpoint.
 
     Returns:
         SegFormerConfig: Parsed local model configuration.
     """
-    raw_cfg = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+    cfg = OmegaConf.load(config_path)
+    cfg.num_classes = num_classes
+    raw_cfg = OmegaConf.to_container(cfg, resolve=True)
     assert isinstance(raw_cfg, dict)
     raw_cfg = cast(dict[str, Any], raw_cfg)
     return SegFormerConfig(**raw_cfg)
@@ -52,8 +55,8 @@ def test_hf_segformer_parity(config_path: Path) -> None:
         None: Asserts parity against the Hugging Face implementation.
     """
     assert config_path.stem in HF_MODEL_IDS
-    local_cfg = load_local_config(config_path)
     hf_model = load_hf_model(config_path.stem)
+    local_cfg = load_local_config(config_path, num_classes=hf_model.config.num_labels)
     local_model = SegFormer(local_cfg).eval()
 
     incompatible = local_model.load_state_dict(

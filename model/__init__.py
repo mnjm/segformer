@@ -11,7 +11,7 @@ from omegaconf import DictConfig
 
 from .decoder import SegFormerDecoder
 from .hf_mapper import build_encoder_state_dict, load_hf_model
-from .mix_transformer import MixTransformer
+from .mix_transformer import ChannelLayerNorm2d, MixTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class SegFormerConfig:
     drop_rate: float = 0.0
     attn_drop_rate: float = 0.0
     drop_path_rate: float = 0.0
-    norm_layer: type[nn.LayerNorm] = nn.LayerNorm
+    norm_layer: type[nn.Module] = ChannelLayerNorm2d
     depths: list[int] = field(default_factory=lambda: [2, 2, 2, 2])
     sr_ratios: list[int] = field(default_factory=lambda: [8, 4, 2, 1])
     decoder_dim: int = 256
