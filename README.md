@@ -63,13 +63,10 @@ A fresh run initializes the encoder from the matching Hugging Face checkpoint.
 Common overrides:
 
 ```bash
-uv run python train.py model=segformer-b2
-uv run python train.py device_type=cpu
-uv run python train.py device_type=auto
-uv run python train.py dataset.dataloader.batch_size=4
-uv run python train.py init_from=/absolute/path/to/checkpoint.pt
-uv run python train.py torch_compile=true
+uv run python train.py model=segformer-b2 device_type=auto dataset.dataloader.batch_size=4 init_from=/absolute/path/to/checkpoint.pt torch_compile=true
 ```
+
+Check [config](./config).
 
 `device_type=cuda` requires CUDA. `device_type=auto` falls back to MPS, then XLA, then CPU. `init_from=...` resumes model, optimizer, scheduler, epoch, and W&B state (if enabled).
 
