@@ -120,6 +120,10 @@ Useful flags:
 - `--top N`
 - `--bottom N`
 
+## HF Export
+
+Trained checkpoint is converted to HF's `SegformerForSemanticSegmentation` format and uploaded [here](https://huggingface.co/mnjm/segformer-b0-voc)
+
 ## Testing
 
 Run the Hugging Face parity test:
